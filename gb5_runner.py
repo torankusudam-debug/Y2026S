@@ -10,6 +10,42 @@ from gb5_bbox import get_page_bbox_candidates_px, make_part_png_bytes_using_ref_
 from gb5_pdf_struct import render_page_to_pil
 from gb5_single import solve_single_type_no_waste, build_single_placements, append_pages_single
 from gb5_full import pack_full_sequential_sheets, append_one_full_sheet
+from gb5_merge import merge_pages_vertical
+
+
+def _build_single_temp_docs(best, placements, pages, qr_bytes, label_text, img_bytes):
+    """
+    为整拼生成临时的单页fitz文档列表（每页一个doc），用于后续垂直合并。
+    返回 list of dict: [{"doc": fitz.Document, "page_index": 0, "W_mm": W, "H_mm": H}, ...]
+    """
+    W = best["W"]
+    H = best["H"]
+    result = []
+    for _ in range(pages):
+        tmp_doc = fitz.open()
+        append_pages_single(tmp_doc, best, placements, 1, qr_bytes, label_text, img_bytes)
+        result.append({
+            "doc": tmp_doc,
+            "page_index": 0,
+            "W_mm": W,
+            "H_mm": H,
+        })
+    return result
+
+
+def _build_full_temp_doc(sheet, by_tid, is_contour):
+    """
+    为全拼的一个sheet生成临时的单页fitz文档，用于后续垂直合并。
+    返回 dict: {"doc": fitz.Document, "page_index": 0, "W_mm": W, "H_mm": H}
+    """
+    tmp_doc = fitz.open()
+    append_one_full_sheet(tmp_doc, sheet, by_tid, is_contour=is_contour)
+    return {
+        "doc": tmp_doc,
+        "page_index": 0,
+        "W_mm": int(sheet["W"]),
+        "H_mm": int(sheet["H"]),
+    }
 
 
 def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
@@ -53,6 +89,13 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
     ok_list = []
     skip_list = []
 
+    # ---- 收集所有整拼的临时页面（按源文件分组） ----
+    # 结构: single_temp_groups = [
+    #   {"type_name": "xxx", "pages_p1": [...], "pages_p2": [...]},
+    #   ...
+    # ]
+    single_temp_groups = []
+
     N_total = len(archived_paths)
 
     for idx, path in enumerate(archived_paths, start=1):
@@ -63,9 +106,8 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
             progress_cb(idx - 1, N_total, "处理中 %d/%d  %s" % (idx - 1, N_total, type_name_raw))
 
         d = None
-        out1_single = fitz.open()
-        out2_single = fitz.open()
-        has_single_pages = False
+        temp_pages_p1 = []  # 该源文件的所有整拼临时页 (p1)
+        temp_pages_p2 = []  # 该源文件的所有整拼临时页 (p2)
 
         try:
             d = fitz.open(path)
@@ -121,10 +163,13 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
                 placements = build_single_placements(tid, best)
                 qr_bytes = make_qr_png_bytes(qr_text)
 
-                append_pages_single(out1_single, best, placements, best["pages"], qr_bytes, label_text, img_body)
-                append_pages_single(out2_single, best, placements, best["pages"], qr_bytes, label_text, img_cont)
+                # 生成临时单页文档（每页一个doc）
+                tmp_p1 = _build_single_temp_docs(best, placements, best["pages"], qr_bytes, label_text, img_body)
+                tmp_p2 = _build_single_temp_docs(best, placements, best["pages"], qr_bytes, label_text, img_cont)
 
-                has_single_pages = True
+                temp_pages_p1.extend(tmp_p1)
+                temp_pages_p2.extend(tmp_p2)
+
                 ok_list.append((tid, best["pages"]))
                 _log(log_cb, "✅ 整拼OK: %s pages=%d W=%.1f H=%.1f" % (tid, best["pages"], best["W"], best["H"]))
 
@@ -138,43 +183,123 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
             except Exception:
                 pass
 
-            if has_single_pages:
-                out_path1 = os.path.join(C.DEST_DIR1, type_name + ".pdf")
-                out_path2 = os.path.join(C.DEST_DIR2, type_name + ".pdf")
-                p1 = safe_save(out1_single, out_path1)
-                p2 = safe_save(out2_single, out_path2)
+            if temp_pages_p1:
+                single_temp_groups.append({
+                    "type_name": type_name,
+                    "pages_p1": temp_pages_p1,
+                    "pages_p2": temp_pages_p2,
+                })
+
+    # ========================================================
+    # 整拼垂直合并：每个源文件单独处理
+    # ========================================================
+    zhengpin_counter = 0  # 全局整拼编号计数器
+
+    for grp in single_temp_groups:
+        type_name = grp["type_name"]
+        pages_p1 = grp["pages_p1"]
+        pages_p2 = grp["pages_p2"]
+
+        # 垂直合并
+        merged_p1 = merge_pages_vertical(pages_p1, max_w_mm=C.SINGLE_W_MAX, max_h_mm=C.SINGLE_H_MAX)
+        merged_p2 = merge_pages_vertical(pages_p2, max_w_mm=C.SINGLE_W_MAX, max_h_mm=C.SINGLE_H_MAX)
+
+        num_merged = len(merged_p1)
+
+        if num_merged == 1:
+            # 只产生一个PDF，用源文件名
+            out_path1 = os.path.join(C.DEST_DIR1, type_name + ".pdf")
+            out_path2 = os.path.join(C.DEST_DIR2, type_name + ".pdf")
+            p1 = safe_save(merged_p1[0], out_path1)
+            p2 = safe_save(merged_p2[0], out_path2)
+            single_outputs_p1.append(p1)
+            single_outputs_p2.append(p2)
+            _log(log_cb, "📄 整拼保存（源文件名）：%s | %s" % (p1, p2))
+        else:
+            # 产生多个PDF，用“整拼n”命名
+            for mi in range(num_merged):
+                zhengpin_counter += 1
+                name = u"整拼%d" % zhengpin_counter
+                out_path1 = os.path.join(C.DEST_DIR1, name + ".pdf")
+                out_path2 = os.path.join(C.DEST_DIR2, name + ".pdf")
+                p1 = safe_save(merged_p1[mi], out_path1)
+                p2 = safe_save(merged_p2[mi], out_path2)
                 single_outputs_p1.append(p1)
                 single_outputs_p2.append(p2)
-                _log(log_cb, "📄 整拼保存：%s | %s" % (p1, p2))
-            else:
-                try:
-                    out1_single.close()
-                except Exception:
-                    pass
-                try:
-                    out2_single.close()
-                except Exception:
-                    pass
+                _log(log_cb, "📄 整拼保存（整拼%d）：%s | %s" % (zhengpin_counter, p1, p2))
 
+        # 关闭临时文档
+        for item in pages_p1:
+            try:
+                item["doc"].close()
+            except Exception:
+                pass
+        for item in pages_p2:
+            try:
+                item["doc"].close()
+            except Exception:
+                pass
+
+    # ========================================================
+    # 全拼部分：先生成临时单页，再垂直合并
+    # ========================================================
     full_p1 = None
     full_p2 = None
+    full_outputs_p1 = []
+    full_outputs_p2 = []
+
     if fullmix_pool:
         _log(log_cb, "🧩 开始顺序全拼（汇总到同一个PDF）：pool_types=%d" % len(fullmix_pool))
 
         sheets, by_tid = pack_full_sequential_sheets(fullmix_pool, log_cb=log_cb)
-        out1_full = fitz.open()
-        out2_full = fitz.open()
 
+        # 为每个sheet生成临时单页文档
+        temp_full_p1 = []
+        temp_full_p2 = []
         for si, sh in enumerate(sheets, start=1):
-            append_one_full_sheet(out1_full, sh, by_tid, is_contour=False)
-            append_one_full_sheet(out2_full, sh, by_tid, is_contour=True)
+            tmp1 = _build_full_temp_doc(sh, by_tid, is_contour=False)
+            tmp2 = _build_full_temp_doc(sh, by_tid, is_contour=True)
+            temp_full_p1.append(tmp1)
+            temp_full_p2.append(tmp2)
             ok_list.append(("FULLSEQ#%d(owner=%s)" % (si, sh["owner_tid"]), 1))
 
-        full_path1 = os.path.join(C.DEST_DIR1, u"全拼.pdf")
-        full_path2 = os.path.join(C.DEST_DIR2, u"全拼.pdf")
-        full_p1 = safe_save(out1_full, full_path1)
-        full_p2 = safe_save(out2_full, full_path2)
-        _log(log_cb, "📌 全拼保存：%s | %s" % (full_p1, full_p2))
+        # 垂直合并全拼
+        merged_full_p1 = merge_pages_vertical(temp_full_p1, max_w_mm=C.FULL_W_MAX, max_h_mm=C.FULL_H_MAX)
+        merged_full_p2 = merge_pages_vertical(temp_full_p2, max_w_mm=C.FULL_W_MAX, max_h_mm=C.FULL_H_MAX)
+
+        num_full = len(merged_full_p1)
+        if num_full == 1:
+            full_path1 = os.path.join(C.DEST_DIR1, u"全拼.pdf")
+            full_path2 = os.path.join(C.DEST_DIR2, u"全拼.pdf")
+            full_p1 = safe_save(merged_full_p1[0], full_path1)
+            full_p2 = safe_save(merged_full_p2[0], full_path2)
+            full_outputs_p1.append(full_p1)
+            full_outputs_p2.append(full_p2)
+            _log(log_cb, "📌 全拼保存：%s | %s" % (full_p1, full_p2))
+        else:
+            for fi in range(num_full):
+                name = u"全拼_%d" % (fi + 1)
+                full_path1 = os.path.join(C.DEST_DIR1, name + ".pdf")
+                full_path2 = os.path.join(C.DEST_DIR2, name + ".pdf")
+                fp1 = safe_save(merged_full_p1[fi], full_path1)
+                fp2 = safe_save(merged_full_p2[fi], full_path2)
+                full_outputs_p1.append(fp1)
+                full_outputs_p2.append(fp2)
+                _log(log_cb, "📌 全拼保存（全拼_%d）：%s | %s" % (fi + 1, fp1, fp2))
+            full_p1 = full_outputs_p1[0] if full_outputs_p1 else None
+            full_p2 = full_outputs_p2[0] if full_outputs_p2 else None
+
+        # 关闭临时文档
+        for item in temp_full_p1:
+            try:
+                item["doc"].close()
+            except Exception:
+                pass
+        for item in temp_full_p2:
+            try:
+                item["doc"].close()
+            except Exception:
+                pass
 
     if progress_cb:
         progress_cb(N_total, N_total, "完成 %d/%d" % (N_total, N_total))
