@@ -60,6 +60,7 @@ MARK_LEN = 5.0
 # 图形块尺寸（一块的最大宽高）
 BLOCK_W = 320.0
 BLOCK_H = 464.0
+BLOCK_GAP = 10.0   # 块与块之间的间隔(mm)
 
 # 纸张尺寸限制
 SINGLE_W_MIN = 600.0

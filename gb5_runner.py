@@ -26,7 +26,7 @@ from gb5_full import pack_full_grid_sheets, append_one_full_sheet
 from gb5_merge import merge_pages_vertical
 
 
-def _build_single_temp_docs(best, placements, pages, qr_bytes, label_text, img_bytes):
+def _build_single_temp_docs(best, placements, blocks, pages, qr_bytes, label_text, img_bytes):
     """
     为整拼生成临时的单页fitz文档列表（每页一个doc），用于后续垂直合并。
     返回 list of dict: [{"doc": fitz.Document, "page_index": 0, "W_mm": W, "H_mm": H}, ...]
@@ -36,7 +36,7 @@ def _build_single_temp_docs(best, placements, pages, qr_bytes, label_text, img_b
     result = []
     for _ in range(pages):
         tmp_doc = fitz.open()
-        append_pages_single(tmp_doc, best, placements, 1, qr_bytes, label_text, img_bytes)
+        append_pages_single(tmp_doc, best, placements, blocks, 1, qr_bytes, label_text, img_bytes)
         result.append({
             "doc": tmp_doc,
             "page_index": 0,
@@ -103,14 +103,6 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
     skip_list = []
 
     # ---- 整拼临时页面按版号分组 ----
-    # 结构: ban_hao_groups = OrderedDict {
-    #   ban_hao: {
-    #       "type_name": str (第一个源文件名，用于单文件命名),
-    #       "pages_p1": [page_info, ...],
-    #       "pages_p2": [page_info, ...],
-    #       "file_count": int (该版号下有多少个源文件),
-    #   }
-    # }
     ban_hao_groups = OrderedDict()
 
     N_total = len(archived_paths)
@@ -125,6 +117,7 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
         d = None
         temp_pages_p1 = []
         temp_pages_p2 = []
+        ban_hao = ""
 
         try:
             d = fitz.open(path)
@@ -195,12 +188,12 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
                     _log(log_cb, "⚠️ 整拼无解 -> 进入全拼池: %s" % tid)
                     continue
 
-                placements = build_single_placements(tid, best)
+                placements, blocks = build_single_placements(tid, best)
                 qr_bytes = make_qr_png_bytes(qr_text)
 
                 # 生成临时单页文档
-                tmp_p1 = _build_single_temp_docs(best, placements, best["pages"], qr_bytes, label_text, img_body)
-                tmp_p2 = _build_single_temp_docs(best, placements, best["pages"], qr_bytes, label_text, img_cont)
+                tmp_p1 = _build_single_temp_docs(best, placements, blocks, best["pages"], qr_bytes, label_text, img_body)
+                tmp_p2 = _build_single_temp_docs(best, placements, blocks, best["pages"], qr_bytes, label_text, img_cont)
 
                 temp_pages_p1.extend(tmp_p1)
                 temp_pages_p2.extend(tmp_p2)

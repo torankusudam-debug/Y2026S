@@ -2,11 +2,13 @@
 """
 gb5_single.py —— 整拼模块
 
-整拼标注规则：
-  - 二维码放右上角
-  - 单号放左上角
-  - 刀线只标注在左侧边缘和顶部边缘
-  - 320×464为图形的一块
+整拼规则：
+  - 同一个源文件的图形排入块（≤320×464mm）
+  - 块间间隔 BLOCK_GAP (10mm)
+  - 每个块的右上角放二维码，左上角放单号
+  - 刀线只标注在左侧边缘和顶部边缘，长度5mm
+  - 纸宽固定600mm，就算没排满一排也保持600mm
+  - N≥10 时才进入整拼
 """
 import math
 import fitz
@@ -15,188 +17,228 @@ import gb5_config as C
 from gb5_utils import mm_to_pt, pick_cjk_fontfile, trim_text_to_width
 
 
-def cap_block(dim_mm, block_max_mm):
-    dim = float(dim_mm)
-    if dim <= 0:
+# ============================================================
+# 块内排列：在一个 BLOCK_W × BLOCK_H 的块内能放多少个图形
+# ============================================================
+
+def _block_layout(z_mm, h_mm):
+    """
+    计算一个块内能放多少个图形。
+    z_mm: 图形宽(mm)
+    h_mm: 图形高(mm)
+    返回: (cols_per_block, rows_per_block, block_actual_w, block_actual_h)
+    """
+    if z_mm <= 0 or h_mm <= 0:
+        return 0, 0, 0, 0
+    cols = int(C.BLOCK_W // z_mm)
+    rows = int(C.BLOCK_H // h_mm)
+    if cols <= 0 or rows <= 0:
+        return 0, 0, 0, 0
+    actual_w = cols * z_mm
+    actual_h = rows * h_mm
+    return cols, rows, actual_w, actual_h
+
+
+def _blocks_per_row(block_actual_w, paper_w):
+    """
+    一排（纸宽 paper_w）能放多少个块。
+    块间间隔 BLOCK_GAP。
+    """
+    if block_actual_w <= 0:
         return 0
-    cap = int(block_max_mm // dim)
-    return cap if cap >= 1 else 0
-
-
-def groups_for_k(capx, k):
-    m = int(math.ceil(k / float(capx)))
-    groups = [capx] * (m - 1)
-    last = k - (m - 1) * capx
-    if last <= 0 or last > capx:
-        return None, None
-    groups.append(last)
-    return m, groups
-
-
-def max_rows_fit(h_mm, capy, H_sheet):
-    avail = float(H_sheet) - C.QR_BAND
-    h = float(h_mm)
-    if avail < h:
-        return 0, 0.0
-
-    best_rows = 0
-    best_s = 0
-    for s in range(1, 10000):
-        avail_rows_height = avail - C.GAP * (s - 1)
-        if avail_rows_height < h:
-            break
-        rows_fit = int(avail_rows_height // h)
-        if rows_fit <= (s - 1) * capy:
-            continue
-        rows = min(rows_fit, s * capy)
-        if rows > best_rows:
-            best_rows = rows
-            best_s = s
-
-    usedH = best_rows * h + C.GAP * (best_s - 1)
-    return int(best_rows), float(usedH)
+    bpr = 1
+    while (bpr + 1) * block_actual_w + bpr * C.BLOCK_GAP <= paper_w + 0.01:
+        bpr += 1
+    return bpr
 
 
 def solve_single_type_no_waste(outer_w, outer_h, need_count):
+    """
+    整拼求解：找到最佳排列方案。
+
+    尝试两种方向（不旋转/旋转90度），选择总面积最小的方案。
+
+    返回 best dict 或 None。
+    """
     best = None
+
     for ori in (0, 1):
         z = outer_w if ori == 0 else outer_h
         h = outer_h if ori == 0 else outer_w
 
-        capx = cap_block(z, C.BLOCK_W)
-        block_max_h = C.BLOCK_H
-        capy = cap_block(h, block_max_h)
-        if capx <= 0 or capy <= 0:
+        cols_blk, rows_blk, blk_w, blk_h = _block_layout(z, h)
+        if cols_blk <= 0 or rows_blk <= 0:
             continue
 
-        k_upper = int(C.SINGLE_W_MAX // z) + 3
-        for k in range(1, k_upper + 1):
-            m, groups = groups_for_k(capx, k)
-            if groups is None:
-                continue
-            R = k * z + C.GAP * (m - 1)
-            if R < C.SINGLE_W_MIN - 1e-9:
-                continue
-            if R > C.SINGLE_W_MAX + 1e-9:
+        cap_per_block = cols_blk * rows_blk
+        bpr = _blocks_per_row(blk_w, C.SINGLE_W_MAX)
+        if bpr <= 0:
+            continue
+
+        # 一排的宽度
+        row_w = bpr * blk_w + (bpr - 1) * C.BLOCK_GAP
+        # 纸宽固定600mm
+        W = C.SINGLE_W_MAX
+
+        # 计算需要多少排（垂直方向）
+        blocks_needed = int(math.ceil(need_count / float(cap_per_block)))
+
+        # 一张纸上能放多少排块
+        max_block_rows = 1
+        while True:
+            test_h = max_block_rows * blk_h + (max_block_rows - 1) * C.BLOCK_GAP
+            if test_h > C.SINGLE_H_MAX + 0.01:
+                max_block_rows -= 1
                 break
+            if max_block_rows * bpr >= blocks_needed:
+                break
+            max_block_rows += 1
 
-            for H_sheet in range(int(C.SINGLE_H_MIN), int(C.SINGLE_H_MAX) + 1):
-                rows_max, used_parts_h = max_rows_fit(h, capy, H_sheet)
-                if rows_max <= 0:
-                    continue
-                H_real = C.QR_BAND + used_parts_h
-                if H_real > C.SINGLE_H_MAX + 1e-9:
-                    continue
+        if max_block_rows <= 0:
+            max_block_rows = 1
 
-                cap_sheet = rows_max * k
-                pages = int(math.ceil(need_count / float(cap_sheet)))
-                area = pages * (R * H_real)
+        blocks_per_page = max_block_rows * bpr
+        cap_per_page = blocks_per_page * cap_per_block
+        pages = int(math.ceil(need_count / float(cap_per_page)))
 
-                cand = {
-                    "ori": ori, "z": float(z), "h": float(h),
-                    "k": int(k), "groups": list(groups),
-                    "rows": int(rows_max),
-                    "W": float(R),
-                    "H": float(H_real),
-                    "cap_sheet": int(cap_sheet),
-                    "pages": int(pages),
-                    "total_area": float(area),
-                }
+        # 实际高度
+        H = max_block_rows * blk_h + (max_block_rows - 1) * C.BLOCK_GAP
+        if H > C.SINGLE_H_MAX + 0.01:
+            continue
 
-                if best is None or cand["total_area"] < best["total_area"] - 1e-9:
-                    best = cand
-                elif best is not None and abs(cand["total_area"] - best["total_area"]) <= 1e-9:
-                    if cand["H"] < best["H"] - 1e-9:
-                        best = cand
+        area = pages * W * H
+
+        cand = {
+            "ori": ori,
+            "z": float(z),
+            "h": float(h),
+            "cols_blk": cols_blk,
+            "rows_blk": rows_blk,
+            "blk_w": float(blk_w),
+            "blk_h": float(blk_h),
+            "bpr": bpr,              # 每排块数
+            "block_rows": max_block_rows,  # 垂直方向块排数
+            "cap_per_block": cap_per_block,
+            "cap_per_page": cap_per_page,
+            "W": float(W),
+            "H": float(H),
+            "pages": pages,
+            "total_area": float(area),
+        }
+
+        if best is None or cand["total_area"] < best["total_area"] - 1e-9:
+            best = cand
+        elif abs(cand["total_area"] - best["total_area"]) <= 1e-9:
+            if cand["H"] < best["H"] - 1e-9:
+                best = cand
 
     return best
 
 
 def build_single_placements(type_id, best):
+    """
+    构建整拼的放置列表。
+
+    返回:
+      placements: list of dict，每个图形的位置
+      blocks: list of dict，每个块的位置和尺寸（用于标注二维码和单号）
+    """
     z = best["z"]
     h = best["h"]
-    capy = int(math.floor(C.BLOCK_H / float(h)))
-    if capy <= 0:
-        capy = 1
+    cols_blk = best["cols_blk"]
+    rows_blk = best["rows_blk"]
+    blk_w = best["blk_w"]
+    blk_h = best["blk_h"]
+    bpr = best["bpr"]
+    block_rows = best["block_rows"]
 
     placements = []
-    rows = best["rows"]
-    groups = best["groups"]
+    blocks = []
 
-    for r in range(rows):
-        seg_idx = r // capy
-        y = C.QR_BAND + r * h + seg_idx * C.GAP
-        x = 0.0
-        for gi, gsz in enumerate(groups):
-            for _ in range(gsz):
-                placements.append({"type": type_id, "x": x, "y": y, "w": z, "h": h, "rot": (best["ori"] == 1)})
-                x += z
-            if gi != len(groups) - 1:
-                x += C.GAP
-    return placements
+    for br in range(block_rows):
+        block_y = br * (blk_h + C.BLOCK_GAP)
+        for bc in range(bpr):
+            block_x = bc * (blk_w + C.BLOCK_GAP)
+
+            blocks.append({
+                "x": block_x,
+                "y": block_y,
+                "w": blk_w,
+                "h": blk_h,
+            })
+
+            # 块内排列图形
+            for row in range(rows_blk):
+                for col in range(cols_blk):
+                    px = block_x + col * z
+                    py = block_y + row * h
+                    placements.append({
+                        "type": type_id,
+                        "x": px,
+                        "y": py,
+                        "w": z,
+                        "h": h,
+                        "rot": (best["ori"] == 1),
+                        "block_idx": len(blocks) - 1,
+                    })
+
+    return placements, blocks
 
 
-def compute_edges_from_placements(placements):
+def compute_edges_from_blocks(blocks, blk_w, blk_h):
+    """
+    从块列表计算刀线边界。
+    """
     xs = set()
     ys = set()
-    for p in placements:
-        xs.add(int(round(p["x"])))
-        xs.add(int(round(p["x"] + p["w"])))
-        ys.add(int(round(p["y"])))
-        ys.add(int(round(p["y"] + p["h"])))
+    for b in blocks:
+        xs.add(round(b["x"], 2))
+        xs.add(round(b["x"] + b["w"], 2))
+        ys.add(round(b["y"], 2))
+        ys.add(round(b["y"] + b["h"], 2))
     return sorted(xs), sorted(ys)
 
 
-def draw_label_in_band(page, text, x_mm, y_mm, w_mm):
-    """在左上角绘制单号标签。"""
+def draw_label_in_block(page, text, block_x, block_y, block_w):
+    """在块的左上角绘制单号标签。"""
     fontfile = pick_cjk_fontfile()
-    xpt = mm_to_pt(x_mm + 1.0)
-    ypt = mm_to_pt(y_mm - 1.5)
-    max_w = mm_to_pt(w_mm - C.QR_W - 2.0)
+    xpt = mm_to_pt(block_x + 1.0)
+    ypt = mm_to_pt(block_y + C.QR_H - 1.5)
+    max_w = mm_to_pt(block_w - C.QR_W - 2.0)
     txt = trim_text_to_width(text, C.LABEL_FONT_SIZE, max_w)
 
     if fontfile:
-        page.insert_text(fitz.Point(xpt, ypt), txt, fontsize=C.LABEL_FONT_SIZE, fontfile=fontfile, color=(0, 0, 0))
+        page.insert_text(fitz.Point(xpt, ypt), txt,
+                         fontsize=C.LABEL_FONT_SIZE, fontfile=fontfile, color=(0, 0, 0))
     else:
-        page.insert_text(fitz.Point(xpt, ypt), txt, fontsize=C.LABEL_FONT_SIZE, fontname="helv", color=(0, 0, 0))
+        page.insert_text(fitz.Point(xpt, ypt), txt,
+                         fontsize=C.LABEL_FONT_SIZE, fontname="helv", color=(0, 0, 0))
 
 
-def append_pages_single(out_doc, best, placements, pages, qr_bytes, label_text, img_bytes):
+def append_pages_single(out_doc, best, placements, blocks, pages, qr_bytes, label_text, img_bytes):
     """
     整拼绘制页面。
 
     标注规则：
-      - 二维码放右上角
-      - 单号放左上角
-      - 刀线只标注在左侧边缘和顶部边缘
+      - 每个块的右上角放二维码
+      - 每个块的左上角放单号
+      - 刀线只标注在左侧边缘和顶部边缘，长度5mm
     """
     W = best["W"]
     H = best["H"]
     Wpt = mm_to_pt(W)
     Hpt = mm_to_pt(H)
 
-    # 二维码放右上角
-    qr_rect = fitz.Rect(Wpt - mm_to_pt(C.QR_W), 0, Wpt, mm_to_pt(C.QR_H))
-
-    x_edges, y_edges = compute_edges_from_placements(placements)
-    ml = mm_to_pt(C.MARK_LEN)
-
-    # 找到左上角第一个placement（用于标注单号位置）
-    first_p = None
-    for p in placements:
-        if first_p is None or p["y"] < first_p["y"] - 1e-9 or (abs(p["y"] - first_p["y"]) <= 1e-9 and p["x"] < first_p["x"]):
-            first_p = p
+    blk_w = best["blk_w"]
+    blk_h = best["blk_h"]
+    x_edges, y_edges = compute_edges_from_blocks(blocks, blk_w, blk_h)
+    ml = mm_to_pt(C.MARK_LEN)  # 刀线长度 5mm
 
     for _ in range(pages):
         page = out_doc.new_page(width=Wpt, height=Hpt)
 
         # 纸张外框
         page.draw_rect(fitz.Rect(0, 0, Wpt, Hpt), color=(0, 0, 0), width=1.0)
-
-        # 二维码放右上角
-        page.draw_rect(qr_rect, color=(0, 0, 0), width=1.0)
-        if qr_bytes:
-            page.insert_image(qr_rect, stream=qr_bytes, keep_proportion=True)
 
         # 绘制所有图形
         for p in placements:
@@ -214,21 +256,41 @@ def append_pages_single(out_doc, best, placements, pages, qr_bytes, label_text, 
             )
 
             if img_bytes:
-                page.insert_image(inner, stream=img_bytes, keep_proportion=True, rotate=(90 if p["rot"] else 0))
+                page.insert_image(inner, stream=img_bytes, keep_proportion=True,
+                                  rotate=(90 if p["rot"] else 0))
 
-        # 单号放左上角
-        if first_p is not None and label_text:
-            draw_label_in_band(page, label_text, first_p["x"], first_p["y"], first_p["w"])
+        # 每个块标注二维码（右上角）和单号（左上角）
+        for b in blocks:
+            bx = b["x"]
+            by = b["y"]
+            bw = b["w"]
 
-        # ---- 刀线：只在顶部边缘（垂直刀线标记）和左侧边缘（水平刀线标记） ----
+            # 二维码放块的右上角
+            qr_rect = fitz.Rect(
+                mm_to_pt(bx + bw - C.QR_W),
+                mm_to_pt(by),
+                mm_to_pt(bx + bw),
+                mm_to_pt(by + C.QR_H),
+            )
+            page.draw_rect(qr_rect, color=(0, 0, 0), width=1.0)
+            if qr_bytes:
+                page.insert_image(qr_rect, stream=qr_bytes, keep_proportion=True)
+
+            # 单号放块的左上角
+            if label_text:
+                draw_label_in_block(page, label_text, bx, by, bw)
+
+        # ---- 刀线：只在顶部边缘和左侧边缘，长度5mm ----
         # 顶部边缘：垂直刀线
         for xx in x_edges:
             xpt = mm_to_pt(xx)
             if xpt > 0 and xpt < Wpt:
-                page.draw_line(fitz.Point(xpt, 0), fitz.Point(xpt, ml), color=(0, 0, 0), width=1.0)
+                page.draw_line(fitz.Point(xpt, 0), fitz.Point(xpt, ml),
+                               color=(0, 0, 0), width=1.0)
 
         # 左侧边缘：水平刀线
         for yy in y_edges:
             ypt = mm_to_pt(yy)
             if ypt > 0 and ypt < Hpt:
-                page.draw_line(fitz.Point(0, ypt), fitz.Point(ml, ypt), color=(0, 0, 0), width=1.0)
+                page.draw_line(fitz.Point(0, ypt), fitz.Point(ml, ypt),
+                               color=(0, 0, 0), width=1.0)
