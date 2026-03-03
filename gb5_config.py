@@ -46,7 +46,7 @@ def set_runtime_paths(dest_dir, archive_dir, out_dir1, out_dir2):
 
 
 # =========================
-# 工艺参数（保持原值）
+# 工艺参数
 # =========================
 OUTER_EXT = 2.0
 INNER_GAP = 3.0
@@ -57,14 +57,22 @@ LABEL_BAND = 6.0
 INNER_MARGIN_MM = 5.0
 MARK_LEN = 5.0
 
+# 图形块尺寸（一块的最大宽高）
+BLOCK_W = 320.0
+BLOCK_H = 464.0
+
+# 纸张尺寸限制
 SINGLE_W_MIN = 600.0
 SINGLE_W_MAX = 600.0
 SINGLE_H_MIN = 1
-SINGLE_H_MAX = 1080
+SINGLE_H_MAX = 1500
 
 FULL_W_MIN = 600
 FULL_W_MAX = 600
-FULL_H_MAX = 1080
+FULL_H_MAX = 1500
+
+# N < FULL_THRESHOLD 时直接进入全拼
+FULL_THRESHOLD = 10
 
 QR_BAND = 10.0
 QR_W = 10.0
@@ -78,6 +86,6 @@ TEXT_MASK_PAD_MM = 1.2
 
 DRAW_PART_OUTER_BOX = False
 
-# 全拼 band（保持原）
+# 全拼 band
 FULL_TOP_PAD = 0.0
 FULL_LABEL_BAND = 10.0
