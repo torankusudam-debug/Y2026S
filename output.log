@@ -1,0 +1,79 @@
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''
+Exception ignored on calling ctypes callback function: <compiled_function HollowWindow.install_hook.<locals>.callback at 0x000001B10BECF640>
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 282, in callback
+  File "D:\印客链\win\HollowWindow.py", line 422, in update_window_info_LOCATIONCHANGE
+pywintypes.error: (1400, 'GetWindowRect', '无效的窗口句柄。')
+Traceback (most recent call last):
+  File "D:\印客链\views\DesignCenter.py", line 310, in get_start_file
+  File "D:\印客链\shutil.py", line 417, in copy
+  File "D:\印客链\shutil.py", line 256, in copyfile
+PermissionError: [Errno 13] Permission denied: 'Q:\\设计文件夹\\丰康旗舰店\\2026-2-2\\丰康旗舰店^2008pww^500^打样^pp合成纸不干胶^印刷,不覆膜,模切^20x20^6^PP合成纸不干胶^3223261023546911592^SJ20260202315C.cdr'
+Traceback (most recent call last):
+  File "D:\印客链\views\DesignCenter.py", line 310, in get_start_file
+  File "D:\印客链\shutil.py", line 417, in copy
+  File "D:\印客链\shutil.py", line 256, in copyfile
+PermissionError: [Errno 13] Permission denied: 'Q:\\设计文件夹\\丰康旗舰店\\2026-2-2\\丰康旗舰店^2008pww^200^打样^pp合成纸不干胶^印刷,不覆膜,模切^20x20^1^PP合成纸不干胶^3223261023546911592^SJ20260202315F.cdr'
+Traceback (most recent call last):
+  File "D:\印客链\views\DesignCenter.py", line 310, in get_start_file
+  File "D:\印客链\shutil.py", line 417, in copy
+  File "D:\印客链\shutil.py", line 256, in copyfile
+PermissionError: [Errno 13] Permission denied: 'Q:\\设计文件夹\\丰康旗舰店\\2026-2-2\\丰康旗舰店^2008pww^500^打样^pp合成纸不干胶^印刷,不覆膜,模切^20x20^6^PP合成纸不干胶^3223261023546911592^SJ20260202315C.cdr'
+Traceback (most recent call last):
+  File "D:\印客链\views\DesignCenter.py", line 310, in get_start_file
+  File "D:\印客链\shutil.py", line 417, in copy
+  File "D:\印客链\shutil.py", line 256, in copyfile
+PermissionError: [Errno 13] Permission denied: 'Q:\\设计文件夹\\丰康旗舰店\\2026-2-2\\丰康旗舰店^2008pww^200^打样^pp合成纸不干胶^印刷,不覆膜,模切^20x20^1^PP合成纸不干胶^3223261023546911592^SJ20260202315F.cdr'
+Traceback (most recent call last):
+  File "D:\印客链\views\DesignCenter.py", line 310, in get_start_file
+  File "D:\印客链\shutil.py", line 417, in copy
+  File "D:\印客链\shutil.py", line 256, in copyfile
+PermissionError: [Errno 13] Permission denied: 'Q:\\设计文件夹\\丰康旗舰店\\2026-2-2\\丰康旗舰店^2008pww^500^打样^pp合成纸不干胶^印刷,不覆膜,模切^20x20^6^PP合成纸不干胶^3223261023546911592^SJ20260202315C.cdr'
+Traceback (most recent call last):
+  File "D:\印客链\views\DesignCenter.py", line 310, in get_start_file
+  File "D:\印客链\shutil.py", line 417, in copy
+  File "D:\印客链\shutil.py", line 256, in copyfile
+PermissionError: [Errno 13] Permission denied: 'Q:\\设计文件夹\\丰康旗舰店\\2026-2-2\\丰康旗舰店^2008pww^200^打样^pp合成纸不干胶^印刷,不覆膜,模切^20x20^1^PP合成纸不干胶^3223261023546911592^SJ20260202315F.cdr'
+Traceback (most recent call last):
+  File "D:\印客链\views\DesignCenter.py", line 310, in get_start_file
+  File "D:\印客链\shutil.py", line 417, in copy
+  File "D:\印客链\shutil.py", line 256, in copyfile
+PermissionError: [Errno 13] Permission denied: 'Q:\\设计文件夹\\丰康旗舰店\\2026-2-2\\丰康旗舰店^2008pww^500^打样^pp合成纸不干胶^印刷,不覆膜,模切^20x20^6^PP合成纸不干胶^3223261023546911592^SJ20260202315C.cdr'
+Traceback (most recent call last):
+  File "D:\印客链\win\HollowWindow.py", line 448, in update_window_info_LOCATIONCHANGE
+KeyError: ''

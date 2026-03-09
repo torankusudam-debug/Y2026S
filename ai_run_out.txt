@@ -1,0 +1,4 @@
+﻿DBG jsxPath=d:\WXWork\1688857155804169\Cache\File\2026-02\AItest_ai.jsx
+DBG dataStr=2;D:\WXWork\1688857155804169\Cache\File\2026-02\test1\太阳人旗舰店^卿卿面朝大海春暖花开^1^打样^UV转印贴-PET透明底纸^不覆膜,裁切^420x297^1^0^3209992359821101690^SJ2601310745.ai
+DBG progId=Illustrator.Application
+RET: undefined

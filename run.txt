@@ -1,0 +1,4 @@
+$jsx="D:\WXWork\1688857155804169\Cache\File\2026-02\AItest_ai.jsx"; 
+$vbs="D:\WXWork\1688857155804169\Cache\File\2026-02\run_ai.vbs"; 
+Get-ChildItem "D:\test_data\iest" -Filter *.ai -File | ForEach-Object { $data="2;$($_.FullName)"; 
+Write-Host "RUN -> $data"; & cscript //nologo $vbs $jsx $data }
