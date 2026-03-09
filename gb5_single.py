@@ -185,17 +185,17 @@ def build_single_placements(type_id, best):
     return placements, blocks
 
 
-def compute_edges_from_blocks(blocks, blk_w, blk_h):
+def compute_edges_from_placements(placements):
     """
-    从块列表计算刀线边界。
+    从图片列表计算刀线边界，保证相邻图片可分开。
     """
     xs = set()
     ys = set()
-    for b in blocks:
-        xs.add(round(b["x"], 2))
-        xs.add(round(b["x"] + b["w"], 2))
-        ys.add(round(b["y"], 2))
-        ys.add(round(b["y"] + b["h"], 2))
+    for p in placements:
+        xs.add(round(p["x"], 2))
+        xs.add(round(p["x"] + p["w"], 2))
+        ys.add(round(p["y"], 2))
+        ys.add(round(p["y"] + p["h"], 2))
     return sorted(xs), sorted(ys)
 
 
@@ -229,9 +229,7 @@ def append_pages_single(out_doc, best, placements, blocks, pages, qr_bytes, labe
     Wpt = mm_to_pt(W)
     Hpt = mm_to_pt(H)
 
-    blk_w = best["blk_w"]
-    blk_h = best["blk_h"]
-    x_edges, y_edges = compute_edges_from_blocks(blocks, blk_w, blk_h)
+    x_edges, y_edges = compute_edges_from_placements(placements)
     ml = mm_to_pt(C.MARK_LEN)  # 刀线长度 5mm
 
     for _ in range(pages):
@@ -284,13 +282,13 @@ def append_pages_single(out_doc, best, placements, blocks, pages, qr_bytes, labe
         # 顶部边缘：垂直刀线
         for xx in x_edges:
             xpt = mm_to_pt(xx)
-            if xpt > 0 and xpt < Wpt:
+            if 0 <= xpt <= Wpt:
                 page.draw_line(fitz.Point(xpt, 0), fitz.Point(xpt, ml),
                                color=(0, 0, 0), width=1.0)
 
         # 左侧边缘：水平刀线
         for yy in y_edges:
             ypt = mm_to_pt(yy)
-            if ypt > 0 and ypt < Hpt:
+            if 0 <= ypt <= Hpt:
                 page.draw_line(fitz.Point(0, ypt), fitz.Point(ml, ypt),
                                color=(0, 0, 0), width=1.0)

@@ -26,6 +26,15 @@ from gb5_full import pack_full_grid_sheets, append_one_full_sheet
 from gb5_merge import merge_pages_vertical
 
 
+def _can_fit_in_full_sheet(ow, oh):
+    """是否至少能放入全拼纸张(600x1500)（含旋转90度尝试）。"""
+    if ow <= 0 or oh <= 0:
+        return False
+    fit_normal = (ow <= C.FULL_W_MAX + 0.01 and oh <= C.FULL_H_MAX + 0.01)
+    fit_rot = (oh <= C.FULL_W_MAX + 0.01 and ow <= C.FULL_H_MAX + 0.01)
+    return fit_normal or fit_rot
+
+
 def _build_single_temp_docs(best, placements, blocks, pages, qr_bytes, label_text, img_bytes):
     """
     为整拼生成临时的单页fitz文档列表（每页一个doc），用于后续垂直合并。
@@ -135,6 +144,12 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
             A, B, N = parse_A_B_N_from_filename(path)
             outer_w = int(round(A + 2.0 * C.OUTER_EXT))
             outer_h = int(round(B + 2.0 * C.OUTER_EXT))
+
+            if not _can_fit_in_full_sheet(outer_w, outer_h):
+                raise RuntimeError(
+                    "尺寸超出全拼纸张上限(FULL_W x FULL_H = %.0fx%.0f mm): %dx%d"
+                    % (C.FULL_W_MAX, C.FULL_H_MAX, outer_w, outer_h)
+                )
 
             label_text = extract_label_text(path)
             qr_text = extract_qr_text_from_filename(path)
