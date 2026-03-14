@@ -1,4 +1,4 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 run.py（PySide6 工程GUI版：源PDF -> AI预处理 + 子进程运行拼图算法 get_best6）
 
@@ -7,7 +7,7 @@ run.py（PySide6 工程GUI版：源PDF -> AI预处理 + 子进程运行拼图算
 1) 第2个目录：选择“AI目录”（把源PDF复制并改后缀为 .ai 到这里）
 2) 第3~5个目录功能保持不变
 3) 传入第3个目录（work目录）的文件改为：
-   “第1个源PDF目录里，那些对应 AI 经 JSX 处理成功的原始 PDF 文件”
+   “第2个AI目录里，那些经 JSX 处理成功的 AI 文件”
 4) 然后子进程运行 get_best6 进行拼图
 
 ✅ 仅使用 PySide6（已去掉 PyQt5）
@@ -453,9 +453,12 @@ def run_jsx_batch(ai_files, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_f
 # -------------------------
 # CLI 子进程模式：仅运行 get_best6
 # -------------------------
-def _cli_run_algo(work_dir, out1, out2):
-    apply_paths_to_module(get_best6, work_dir, work_dir, out1, out2)
+def _cli_run_algo(input_dir, work_dir, out1, out2):
+    # PDF 直接在 input_dir 消费，不再复制/迁移到 work_dir
+    apply_paths_to_module(get_best6, input_dir, input_dir, out1, out2)
     print("=== RUN get_best6.py (拼图) ===")
+    print("ALGO_INPUT_DIR:", input_dir)
+    print("ALGO_ARCHIVE_DIR:", input_dir)
     get_best6.main()
     return 0
 
@@ -474,15 +477,19 @@ def _cli_entry():
             return default
 
         work_dir = _get("--work", "")
+        input_dir = _get("--input", "")
         out1 = _get("--out1", "")
         out2 = _get("--out2", "")
 
-        if not work_dir or not out1 or not out2:
+        if not input_dir:
+            input_dir = work_dir
+
+        if not input_dir or not work_dir or not out1 or not out2:
             print("ERR: missing args for --run-algo")
             return 2
 
         try:
-            return _cli_run_algo(work_dir, out1, out2)
+            return _cli_run_algo(input_dir, work_dir, out1, out2)
         except Exception:
             print("❌ ALGO EXCEPTION:\n" + traceback.format_exc())
             return 1
@@ -675,12 +682,6 @@ class RunnerThread(QThread):
                 return
 
             ai_files_to_run = [x["ai_path"] for x in pairs if x.get("ai_path")]
-            ai_to_src_map = {}
-            for x in pairs:
-                sp = x.get("src_pdf", "")
-                ap = x.get("ai_path", "")
-                if sp and ap:
-                    ai_to_src_map[norm_path(ap)] = sp
 
             # 2) 执行 JSX 批处理
             self.sig_status.emit("Running", "AI->PDF (JSX)")
@@ -706,36 +707,23 @@ class RunnerThread(QThread):
                 self.sig_done.emit(rc_jsx)
                 return
 
-            ok_ai = jsx_res.get("ok_ai", [])
-            jsx_export_pdfs = [p for p in (jsx_res.get("ok_pdf", []) or []) if p and os.path.isfile(p)]
-            success_src_pdfs = []
-            for ai_path in ok_ai:
-                src_pdf = ai_to_src_map.get(norm_path(ai_path))
-                if src_pdf and os.path.isfile(src_pdf):
-                    success_src_pdfs.append(src_pdf)
-
-            if jsx_export_pdfs:
-                success_src_pdfs = jsx_export_pdfs
-                self.sig_log.emit("JSX导出PDF数量：%d\n" % len(success_src_pdfs))
-            else:
-                self.sig_log.emit("⚠️ 未检测到JSX导出PDF，回退使用源PDF。\n")
-
-            if not success_src_pdfs:
-                self.sig_log.emit("\n⚠️ 没有 JSX 成功对应的源PDF可传入 work 目录。\n")
+            ok_ai = [p for p in (jsx_res.get("ok_ai", []) or []) if p and os.path.isfile(p)]
+            if not ok_ai:
+                self.sig_log.emit("\n⚠️ 没有 JSX 成功的 AI 可传入 work 目录。\n")
                 self.sig_done.emit(0)
                 return
 
-            self.sig_log.emit("JSX成功对应的源PDF数量：%d\n" % len(success_src_pdfs))
+            self.sig_log.emit("JSX成功AI数量：%d\n" % len(ok_ai))
 
-            # 3) 把“第1个目录里成功对应的源PDF”传到 work
+            # 3) 传入 work 的文件改为：JSX 成功的 AI 文件
             self.sig_status.emit("Running", "Transfer")
-            self.sig_log.emit("\n=== STEP3: TRANSFER INPUT PDFS TO WORK ===\n")
+            self.sig_log.emit("\n=== STEP3: TRANSFER SUCCESS AI FILES TO WORK ===\n")
             moved = self._transfer_selected_files(
-                success_src_pdfs,
+                ok_ai,
                 work_dir,
                 mode=("move" if mode == "move" else "copy")
             )
-            self.sig_log.emit("传输完成：%d 个源PDF进入 work 目录\n\n" % len(moved))
+            self.sig_log.emit("传输完成：%d 个AI进入 work 目录\n\n" % len(moved))
             if self._stop:
                 self.sig_log.emit("⛔ 已停止：不再继续运行算法。\n")
                 self.sig_done.emit(0)
@@ -752,6 +740,7 @@ class RunnerThread(QThread):
             cmd_algo = [
                 sys.executable, "-u", os.path.abspath(__file__),
                 "--run-algo",
+                "--input", ai_dir,
                 "--work", work_dir,
                 "--out1", out1,
                 "--out2", out2
@@ -798,12 +787,12 @@ class HelpDialog(QDialog):
             "2）第2个目录选择：AI目录\n"
             "3）程序会把第1个目录中的 PDF 复制到第2个目录，并改后缀为 .ai（仅改扩展名，不是格式转换）\n"
             "4）对这些 .ai 执行：cscript //nologo run_ai.vbs AItest_ai.jsx \"2;AI全路径;输出目录\"\n"
-            "5）把“JSX成功对应的第1个目录中的原始 PDF”复制/移动到 work 目录\n"
+            "5）把“JSX 处理成功的 AI 文件”复制/移动到 work 目录\n"
             "6）子进程运行 get_best6 进行拼图输出\n\n"
             "【注意】\n"
             "- run.py、AItest_ai.jsx、run_ai.vbs 必须在同一目录\n"
             "- JSX 输出目录仍然是第2个 AI 目录\n"
-            "- 传入 work 的不再是第2个目录导出的 PDF，而是第1个目录中成功对应的原始 PDF\n"
+            "- 传入 work 的是 JSX 成功的 AI 文件（仅归档/留存）\n"
         )
         self.txt.setPlainText(help_text)
 
@@ -917,7 +906,7 @@ class RollWidget(QWidget):
         f = QFont("Microsoft YaHei UI", 18)
         f.setBold(True)
         lb_title.setFont(f)
-        lb_sub = QLabel("顺序：源PDF目录 -> AI目录(.ai) -> JSX成功对应的源PDF传入work -> 子进程拼图 get_best6")
+        lb_sub = QLabel("顺序：源PDF目录 -> AI目录(.ai) -> JSX成功AI传入work -> 子进程拼图 get_best6")
         lb_sub.setStyleSheet("color:#94a3b8;")
         title_box.addWidget(lb_title)
         title_box.addWidget(lb_sub)
@@ -1024,7 +1013,7 @@ class RollWidget(QWidget):
         hb.addWidget(self.btn_clear)
         left_layout.addWidget(gp_btn)
 
-        tip = QLabel("提示：第1个目录是源PDF，第2个目录是AI目录，传入work的是第1个目录中成功对应的原始PDF。")
+        tip = QLabel("提示：传入work的是JSX成功AI，拼图读取AI目录中的PDF。")
         tip.setStyleSheet("color:#94a3b8;")
         left_layout.addWidget(tip)
         left_layout.addStretch(1)
