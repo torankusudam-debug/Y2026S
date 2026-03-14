@@ -1,30 +1,8 @@
-# -*- coding: utf-8 -*-
-"""
-拼图/拼版脚本（双输出版：图形页 + 轮廓页）
-
-✅ 本次更新（按你要求）：
-1) 刀线位置规则改为：
-   - 顶部刀线（短刀线刻度）：
-        x1 = 5
-        x_i = 5 + n*i
-        若跨过 320（x_(i-1)<320 且 x_i>320），则从该 i 起整体 +10（等价于跳过 320~330 空白带）
-   - 左侧刀线（短刀线刻度）：
-        y1 = 10
-        y_i = 10 + m*i
-        若跨过 464，则从该 i 起整体 +10（等价于插入 10mm 空隙）
-        若跨过 928(=464*2)，则从该 i 起整体 +20（再插入一段 10mm 空隙）
-   其中 n/m 为图形宽高（旋转后以实际排布宽高为准）。
-
-2) 删除所有全拼/混拼代码（*_mix.pdf 不再生成）。
-3) 数量 N < 10：不拼版，直接跳过（不输出）。
-"""
-
 import os
 import re
 import math
 import time
 import shutil
-import hashlib
 from io import BytesIO
 
 import fitz
@@ -49,16 +27,38 @@ try:
 except Exception:
     PIL_DRAW_OK = False
 
-
-# =========================
-# 路径（可由 run.py 动态注入）
-# =========================
-DEST_DIR = r"D:\test_data\dest"
-IN_PDF_ARCHIVE_DIR = r"D:\test_data\test"
+DEST_DIR = r"D:\我的数据\文档\get"
+IN_PDF_ARCHIVE_DIR = r"D:\我的数据\文档\已解密文件"
 DEST_DIR1 = r"D:\test_data\gest"
 DEST_DIR2 = r"D:\test_data\pest"
 
 
+
+OUTER_EXT = 2.0                             # 刀线外扩（mm），避免裁剪时漏掉边缘内容
+INNER_MARGIN_MM = 3.0                       # 内边距（mm），避免刀线太靠近内容，影响美观和实用, 也避免裁剪时误伤内容。
+MARK_LEN = 5.0                              # 刀线/刻度长度（mm）
+SINGLE_W = 600.0
+SINGLE_H_MAX = 1500.0
+# 边距 & 320空白带
+SINGLE_MARGIN_L = 5.0                       # 单拼段左边距（mm），避免刀线太靠近边缘，影响美观和实用，也避免裁剪时误伤内容。
+SINGLE_MARGIN_R = 5.0                       # 单拼段右边距（mm），避免刀线太靠近边缘，影响美观和实用，也避免裁剪时误伤内容。
+SINGLE_SPLIT_X = 320.0
+SINGLE_SPLIT_GAP_W = 10.0                   # 单拼段间隔（mm），避免刀线太靠近内容，影响美观和实用，也避免裁剪时误伤内容，同时也能让用户更清晰地看到分段。
+SINGLE_RESERVED_W = SINGLE_SPLIT_GAP_W + (SINGLE_MARGIN_L + SINGLE_MARGIN_R)  # 20
+SINGLE_USABLE_W = SINGLE_W - SINGLE_RESERVED_W  # 580
+# 单拼段右上 QR 区
+QR_BAND = 10.0                              # QR 区高度（mm），从单拼段顶部开始算起, 这个区域内不画刀线刻度，且优先放 QR 码（如果有的话），避免和内容重叠。
+QR_W = 10.0                                 # QR 码宽度（mm），放在单拼段右上角，和右边距一起占满右侧区域，避免和内容重叠。
+QR_H = 10.0                                 # QR 码高度（mm），放在单拼段右上角，和 QR_BAND 一起占满顶部区域，避免和内容重叠。
+LABEL_FONT_SIZE = 10                        # 标签字体大小（pt），放在单拼段右上角，和 QR 码一起占满右侧区域，避免和内容重叠。
+RENDER_DPI = 600                            # PDF渲染分辨率（DPI），600 DPI 可以让毫米级的细节在图像上有足够的像素表现，便于后续的分析和裁剪。
+CROP_PAD_MM = 1.2                           # 裁剪边界额外扩展（mm），避免裁剪时漏掉边缘内容，同时也能让成品看起来更自然一些。
+TEXT_MASK_PAD_MM = 1.2
+
+DRAW_PART_OUTER_BOX = False
+# =========================
+# 基础工具
+# =========================
 def set_runtime_paths(dest_dir, archive_dir, out_dir1, out_dir2):
     global DEST_DIR, IN_PDF_ARCHIVE_DIR, DEST_DIR1, DEST_DIR2
     DEST_DIR = str(dest_dir)
@@ -66,53 +66,15 @@ def set_runtime_paths(dest_dir, archive_dir, out_dir1, out_dir2):
     DEST_DIR1 = str(out_dir1)
     DEST_DIR2 = str(out_dir2)
 
-
-# =========================
-# 参数
-# =========================
-OUTER_EXT = 2.0
-INNER_MARGIN_MM = 5.0
-
-MARK_LEN = 5.0  # 刀线/刻度长度（mm）
-
-SINGLE_W = 600.0
-SINGLE_H_MAX = 1500.0
-
-# 边距 & 320空白带
-SINGLE_MARGIN_L = 5.0
-SINGLE_MARGIN_R = 5.0
-SINGLE_SPLIT_X = 320.0
-SINGLE_SPLIT_GAP_W = 10.0
-
-SINGLE_RESERVED_W = SINGLE_SPLIT_GAP_W + (SINGLE_MARGIN_L + SINGLE_MARGIN_R)  # 20
-SINGLE_USABLE_W = SINGLE_W - SINGLE_RESERVED_W  # 580
-
-# 单拼段右上 QR 区
-QR_BAND = 10.0
-QR_W = 10.0
-QR_H = 10.0
-
-LABEL_FONT_SIZE = 10
-RENDER_DPI = 600
-CROP_PAD_MM = 1.2
-TEXT_MASK_PAD_MM = 1.2
-
-DRAW_PART_OUTER_BOX = False
-# =========================
-# 基础工具
-# =========================
 def ensure_dir(p):
     if p and (not os.path.isdir(p)):
         os.makedirs(p)
 
-
 def mm_to_pt(mm):
     return mm * 72.0 / 25.4
 
-
 def mm_to_px(mm, dpi):
     return int(round(mm * dpi / 25.4))
-
 
 def _log(log_cb, s):
     if log_cb:
@@ -120,14 +82,12 @@ def _log(log_cb, s):
     else:
         print(s)
 
-
 def clamp_bbox(x0, y0, x1, y1, img_w, img_h):
     x0 = max(0, min(img_w - 1, int(round(x0))))
     y0 = max(0, min(img_h - 1, int(round(y0))))
     x1 = max(x0 + 1, min(img_w, int(round(x1))))
     y1 = max(y0 + 1, min(img_h, int(round(y1))))
     return x0, y0, x1, y1
-
 
 def union_bbox(b1, b2):
     if b1 is None:
@@ -141,7 +101,6 @@ def union_bbox(b1, b2):
         max(b1[3], b2[3]),
     )
 
-
 def rect_union(rects):
     rects = [r for r in rects if r is not None]
     if not rects:
@@ -151,7 +110,6 @@ def rect_union(rects):
     x1 = max(r.x1 for r in rects)
     y1 = max(r.y1 for r in rects)
     return fitz.Rect(x0, y0, x1, y1)
-
 
 def archive_input_pdf_to_dir(src_pdf_path, dst_dir):
     os.makedirs(dst_dir, exist_ok=True)
@@ -177,31 +135,10 @@ def archive_input_pdf_to_dir(src_pdf_path, dst_dir):
     shutil.copy2(src_pdf_path, dst_path)
     return dst_path
 
-
-def _sanitize_filename_for_windows(name_no_ext, max_len=160):
-    s = str(name_no_ext)
-    s = s.replace("\\", "_").replace("/", "_").replace(":", "_").replace("*", "_").replace("?", "_").replace('"', "_")
-    s = s.replace("<", "_").replace(">", "_").replace("|", "_")
-    if len(s) <= max_len:
-        return s
-    h = hashlib.md5(s.encode("utf-8", "ignore")).hexdigest()[:10]
-    keep = max(40, max_len - 11)
-    return s[:keep] + "_" + h
-
-
-# =========================
-# 刀线绘制（5mm短刀线/刻度）
-# =========================
 def _draw_left_edge_tick(page, y_mm, tick_len_mm=MARK_LEN, lw=1.0):
     ypt = mm_to_pt(float(y_mm))
     tick = mm_to_pt(float(tick_len_mm))
     page.draw_line(fitz.Point(0, ypt), fitz.Point(tick, ypt), color=(0, 0, 0), width=lw)
-
-
-def _draw_top_edge_tick(page, x_mm, tick_len_mm=MARK_LEN, lw=1.0):
-    xpt = mm_to_pt(float(x_mm))
-    tick = mm_to_pt(float(tick_len_mm))
-    page.draw_line(fitz.Point(xpt, 0), fitz.Point(xpt, tick), color=(0, 0, 0), width=lw)
 
 def _draw_top_tick_at_y(page, x_mm, y_mm, tick_len_mm=MARK_LEN, lw=1.0):
     """在 y=y_mm 这条水平线上，画一根向下的短刻度线"""
@@ -210,9 +147,7 @@ def _draw_top_tick_at_y(page, x_mm, y_mm, tick_len_mm=MARK_LEN, lw=1.0):
     tick = mm_to_pt(float(tick_len_mm))
     page.draw_line(fitz.Point(xpt, ypt), fitz.Point(xpt, ypt + tick), color=(0, 0, 0), width=lw)
 
-# 建议放在参数区
 EDGE_SNAP_MM = 10.0   # <=6mm 就吸到纸边（你现在通常是 5mm）
-
 
 def _snap_edge_mm(v, lo, hi, eps):
     if abs(v - lo) <= eps:
@@ -220,7 +155,6 @@ def _snap_edge_mm(v, lo, hi, eps):
     if abs(v - hi) <= eps:
         return hi
     return v
-
 
 def _draw_segment_cut_ticks(page, seg, yoff_mm, page_h_mm=SINGLE_H_MAX):
     """
@@ -291,88 +225,11 @@ def _draw_segment_cut_ticks(page, seg, yoff_mm, page_h_mm=SINGLE_H_MAX):
         if 0.0 - 1e-6 <= Y <= float(page_h_mm) + 1e-6:
             _draw_left_edge_tick(page, Y, tick_len_mm=MARK_LEN, lw=1.0)
 
-
 def _draw_horizontal_cutline(page, y_mm, lw=1.0):
     ypt = mm_to_pt(float(y_mm))
     Wpt = mm_to_pt(float(SINGLE_W))
     page.draw_line(fitz.Point(0, ypt), fitz.Point(Wpt, ypt), color=(0, 0, 0), width=lw)
 
-
-def _draw_vertical_cutline(page, x_mm, y0_mm, y1_mm, lw=1.0):
-    xpt = mm_to_pt(float(x_mm))
-    y0 = mm_to_pt(float(y0_mm))
-    y1 = mm_to_pt(float(y1_mm))
-    page.draw_line(fitz.Point(xpt, y0), fitz.Point(xpt, y1), color=(0, 0, 0), width=lw)
-
-
-def _draw_edge_ticks_by_nm(page, n_mm, m_mm, W_mm=SINGLE_W, H_mm=SINGLE_H_MAX):
-    """
-    ✅ 区域块规则（你这条消息的要求）
-    - 宽度方向：每个区域块宽度不超过 320mm；块与块之间间距固定 10mm
-      x1=5，默认每次 +n
-      若出现 x < boundary 且 x+n > boundary（boundary 初始 320）：
-         下一根改为 x+10（插入块间距）
-         boundary += 320（进入下一块，防止重复插入）
-      然后继续 +n
-
-    - 高度方向：每个区域块高度不超过 464mm；块与块之间间距固定 10mm
-      y1=10，默认每次 +m
-      若跨过 boundary(初始 464)：下一根 = y+10；boundary += 464
-    """
-    try:
-        n = float(n_mm)
-        m = float(m_mm)
-    except Exception:
-        return
-    if n <= 0 or m <= 0:
-        return
-
-    # -------- 顶部 x 刀线 --------
-    x = 5.0
-    boundary_x = 320.0
-    guard = 0
-    while x <= W_mm + 1e-6:
-        _draw_top_edge_tick(page, x, tick_len_mm=MARK_LEN, lw=1.0)
-
-        nxt = x + n
-
-        # ✅ 只在当前块边界处插一次 10mm
-        if x < boundary_x and nxt > boundary_x:
-            nxt = x + 10.0
-            boundary_x += 320.0  # 进入下一块（600宽一般只会触发一次）
-
-        if nxt <= x + 1e-9:
-            break
-        x = nxt
-
-        guard += 1
-        if guard > 20000:
-            break
-
-    # -------- 左侧 y 刀线 --------
-    y = 10.0
-    boundary_y = 464.0
-    guard = 0
-    while y <= H_mm + 1e-6:
-        _draw_left_edge_tick(page, y, tick_len_mm=MARK_LEN, lw=1.0)
-
-        nxt = y + m
-
-        # ✅ 每跨过一个 464 块，就插一次 10mm
-        if y < boundary_y and nxt > boundary_y:
-            nxt = y + 10.0
-            boundary_y += 464.0
-
-        if nxt <= y + 1e-9:
-            break
-        y = nxt
-
-        guard += 1
-        if guard > 20000:
-            break
-# =========================
-# 文件名解析 A*B^N
-# =========================
 def parse_A_B_N_from_filename(pdf_path):
     base = os.path.splitext(os.path.basename(pdf_path))[0]
     parts = base.split("^")
@@ -409,14 +266,12 @@ def parse_A_B_N_from_filename(pdf_path):
 
     return A, B, N
 
-
 def extract_label_text(pdf_path):
     base = os.path.splitext(os.path.basename(pdf_path))[0]
     ps = base.split("^")
     if len(ps) >= 2:
         return "^".join(ps[:2])
     return base[:40]
-
 
 def extract_qr_text_from_filename(pdf_path):
     base = os.path.splitext(os.path.basename(pdf_path))[0]
@@ -432,7 +287,6 @@ def extract_qr_text_from_filename(pdf_path):
         return "^".join(ps[:2])
 
     return base[:80]
-
 
 def make_qr_png_bytes(qr_text, box_px=240):
     if QR_OK:
@@ -459,7 +313,6 @@ def make_qr_png_bytes(qr_text, box_px=240):
     img.save(bio, format="PNG", optimize=True)
     return bio.getvalue()
 
-
 def pick_cjk_fontfile():
     candidates = [
         r"C:\Windows\Fonts\msyh.ttc",
@@ -472,7 +325,6 @@ def pick_cjk_fontfile():
             return p
     return None
 
-
 def trim_text_to_width(text, fontsize, max_width_pt):
     est = 0.55 * fontsize * len(text)
     if est <= max_width_pt:
@@ -482,10 +334,6 @@ def trim_text_to_width(text, fontsize, max_width_pt):
         return "..."
     return text[:keep] + "..."
 
-
-# =========================
-# PDF结构识别 / bbox
-# =========================
 def _is_probably_page_frame(rect_obj, page_rect):
     if rect_obj is None:
         return False
@@ -500,7 +348,6 @@ def _is_probably_page_frame(rect_obj, page_rect):
         abs(rect_obj.y1 - page_rect.y1) <= tol
     )
     return full_like and touches_all_edges
-
 
 def get_page_struct_info(doc, page_index):
     page = doc.load_page(page_index)
@@ -550,7 +397,6 @@ def get_page_struct_info(doc, page_index):
         "draw_bbox": rect_union(draw_rects),
     }
 
-
 def render_page_to_pil(pdf_path, page_index=0, dpi=RENDER_DPI, doc=None):
     close_doc = False
     if doc is None:
@@ -567,7 +413,6 @@ def render_page_to_pil(pdf_path, page_index=0, dpi=RENDER_DPI, doc=None):
         if close_doc:
             doc.close()
 
-
 def pdf_rect_to_px_bbox(rect_pt, page_rect_pt, img_w, img_h):
     if rect_pt is None:
         return None
@@ -581,7 +426,6 @@ def pdf_rect_to_px_bbox(rect_pt, page_rect_pt, img_w, img_h):
     x1 = (rect_pt.x1 - page_rect_pt.x0) * sx
     y1 = (rect_pt.y1 - page_rect_pt.y0) * sy
     return clamp_bbox(x0, y0, x1, y1, img_w, img_h)
-
 
 def mask_text_regions_on_pil(pil_img, text_boxes_pt, page_rect_pt, pad_mm=TEXT_MASK_PAD_MM):
     if not text_boxes_pt:
@@ -607,7 +451,6 @@ def mask_text_regions_on_pil(pil_img, text_boxes_pt, page_rect_pt, pad_mm=TEXT_M
         arr[y0:y1, x0:x1, :] = 255
     return Image.fromarray(arr)
 
-
 def _bbox_from_mask(mask, W, H):
     ys, xs = np.where(mask > 0)
     if xs.size < 60 or ys.size < 60:
@@ -620,13 +463,11 @@ def _bbox_from_mask(mask, W, H):
         return None
     return (x0, y0, x1, y1)
 
-
 def _reject_border_bbox(x, y, w, h, W, H):
     edge_pad = 8
     touches_edge = (x <= edge_pad or y <= edge_pad or (x + w) >= (W - edge_pad) or (y + h) >= (H - edge_pad))
     huge = (w >= 0.985 * W and h >= 0.985 * H)
     return touches_edge and huge
-
 
 def _bbox_from_contours_union(mask, W, H):
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
@@ -662,7 +503,6 @@ def _bbox_from_contours_union(mask, W, H):
     x1 = max(k[2] for k in keep)
     y1 = max(k[3] for k in keep)
     return (int(x0), int(y0), int(x1), int(y1))
-
 
 def find_outer_bbox(pil_img):
     arr = np.array(pil_img.convert("RGB"))
@@ -729,7 +569,6 @@ def find_outer_bbox(pil_img):
 
     return best if best else candidates[0]
 
-
 def get_page_bbox_candidates_px(doc, page_index, pil_img):
     info = get_page_struct_info(doc, page_index)
     page_rect = info["page_rect"]
@@ -744,11 +583,9 @@ def get_page_bbox_candidates_px(doc, page_index, pil_img):
 
     return draw_bbox_px, image_bbox_px, cv_bbox_px
 
-
 def _expand_bbox_clamped(bbox, exp_px, img_w, img_h):
     x0, y0, x1, y1 = bbox
     return clamp_bbox(x0 - exp_px, y0 - exp_px, x1 + exp_px, y1 + exp_px, img_w, img_h)
-
 
 def make_part_png_bytes_using_ref_bbox(pdf_path, page_index, ref_bbox, ref_size, dpi=RENDER_DPI, doc=None):
     pad_px = mm_to_px(CROP_PAD_MM, dpi)
@@ -795,17 +632,6 @@ def make_part_png_bytes_using_ref_bbox(pdf_path, page_index, ref_bbox, ref_size,
     img.crop((x0, y0, x1, y1)).convert("RGBA").save(bio, format="PNG", optimize=True)
     return bio.getvalue()
 
-
-# =========================
-# 整拼（单类型）快速算法
-# =========================
-def _zone_caps_for_w(w):
-    left_w = max(0.0, SINGLE_SPLIT_X - SINGLE_MARGIN_L)  # 315
-    right_w = max(0.0, (SINGLE_W - SINGLE_MARGIN_R) - (SINGLE_SPLIT_X + SINGLE_SPLIT_GAP_W))  # 265
-    left_cap = int(math.floor(left_w / float(w))) if w > 0 else 0
-    right_cap = int(math.floor(right_w / float(w))) if w > 0 else 0
-    return max(0, left_cap), max(0, right_cap)
-
 def _compute_x_starts_for_w(w):
     """返回每行每列图形的 x 起点列表；块间距固定 10mm；跨 320 时插入间距"""
     W_limit = float(SINGLE_W) - float(SINGLE_MARGIN_R)  # 595
@@ -838,7 +664,6 @@ def _compute_x_starts_for_w(w):
 
     return starts
 
-
 def _compute_y_starts_for_h(h):
     """返回每列每行图形的 y 起点列表；块间距固定 10mm；跨 464 时插入间距"""
     H_limit = float(SINGLE_H_MAX)
@@ -866,8 +691,6 @@ def _compute_y_starts_for_h(h):
             break
 
     return starts
-
-
 
 def solve_single_type_fixed_width(outer_w, outer_h, need_count):
     """
@@ -981,7 +804,6 @@ def draw_label_in_band(page, text, x_mm, y_mm, w_mm):
     else:
         page.insert_text(fitz.Point(xpt, ypt), txt, fontsize=LABEL_FONT_SIZE, fontname="helv", color=(0, 0, 0))
 
-
 def _draw_single_segment_on_page_no_cuts(page, seg, img_bytes, yoff_mm):
     placements = seg["placements"]
     label_text = seg["label_text"]
@@ -1016,7 +838,6 @@ def _draw_single_segment_on_page_no_cuts(page, seg, img_bytes, yoff_mm):
         if img_bytes:
             page.insert_image(inner, stream=img_bytes, keep_proportion=True,
                               rotate=(90 if p["rot"] else 0))
-
 
 def _pack_segments_ffd_to_fixed_sheets(segments, max_h_mm=1500.0, gap_mm=0.0):
     segs = list(segments)
@@ -1069,9 +890,6 @@ def _render_one_single_sheet_doc(sheet, is_contour, fixed_h_mm=SINGLE_H_MAX):
 
     return doc
 
-# =========================
-# safe_save
-# =========================
 def safe_save(doc, out_path):
     ensure_dir(os.path.dirname(out_path))
     tmp_pdf = os.path.join(
@@ -1107,10 +925,6 @@ def safe_save(doc, out_path):
                 pass
         return alt_pdf
 
-
-# =========================
-# 主入口：run()
-# =========================
 def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
     global DEST_DIR, IN_PDF_ARCHIVE_DIR, DEST_DIR1, DEST_DIR2
 
@@ -1290,13 +1104,11 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
         "skip": skip_list,
     }
 
-
 def main():
     res = run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None)
     print("DONE:")
     print("  single_p1_files:", len(res.get("single_p1_files") or []))
     print("  single_p2_files:", len(res.get("single_p2_files") or []))
-
 
 if __name__ == "__main__":
     main()

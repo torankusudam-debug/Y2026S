@@ -7,6 +7,46 @@ var end = 1;
 var mqxSize = 0;
 var newArtboardSize = 0;
 
+function normalizeFilePath(path) {                        
+    return String(path || "").replace(/\\/g, "/");
+}
+
+function normalizeWinPath(path) {
+    return String(path || "").replace(/\//g, "\\");
+}
+
+function safeOutputName(name) {
+    var s = String(name || "");
+    s = s.replace(/[\\\/:\*\?"<>\|]/g, "_");
+    s = s.replace(/[\r\n\t]/g, " ");
+    s = s.replace(/\s+/g, " ");
+    s = s.replace(/[\.\s]+$/g, "");
+    if (!s) s = "output";
+    if (s.length > 120) s = s.substring(0, 120);
+    return s;
+}
+
+function parseRunArgs(data) {
+    var s = String(data || "");
+    var p1 = s.indexOf(";");
+    var p2 = s.indexOf(";", p1 + 1);
+    if (p1 < 0) return { cx: (+s || 0), filePath: "", outDir: "" };
+    if (p2 < 0) {
+        return { cx: (+(s.substring(0, p1)) || 0), filePath: s.substring(p1 + 1), outDir: "" };
+    }
+    return {
+        cx: (+(s.substring(0, p1)) || 0),
+        filePath: s.substring(p1 + 1, p2),
+        outDir: s.substring(p2 + 1)
+    };
+}
+
+function parseSizeToken(token) {
+    var m = String(token || "").match(/(\d+(\.\d+)?)\s*[\*xX×]\s*(\d+(\.\d+)?)/);
+    if (!m) return null;
+    return [ +m[1], +m[3] ];
+}
+
 function mm2pt(mm, needRound) {
     var pt = UnitValue(mm, "mm").as("pt")
     if (needRound) return Math.round(pt);
@@ -15,36 +55,39 @@ function mm2pt(mm, needRound) {
 
 function esIndexOf(searchElement) {
     if (!searchElement) return -1;
-    var name = String(searchElement).toUpperCase();
-    var array = [
-        "PANTONE 802 C",
-        "PANTONE 802C",
-        "CUT",
-        "DIE",
-        "DIELINE",
-        "刀",
-        "模切"
-    ];
+    searchElement = String(searchElement).toUpperCase();
+    var array = ["PANTONE 802 C", "PANTONE 802C", "CUT", "DIE", "DIELINE", "刀", "模切"];
     for (var i = 0; i < array.length; i++)
-        if (name.indexOf(array[i]) !== -1)
+        if (searchElement.indexOf(array[i]) !== -1)
             return i; // 找到，返回索引 (>= 0)
     return -1; // 未找到，返回 -1
 }
 
 function isDieLineStroke(pathItem) {
     if (!pathItem || !pathItem.stroked || !pathItem.strokeColor) return false;
-
     if (pathItem.strokeColor.typename == "SpotColor") {
-        return esIndexOf(pathItem.strokeColor.spot.name) != -1;
+        return !!pathItem.strokeColor.spot && esIndexOf(pathItem.strokeColor.spot.name) != -1;
     }
-
-    // 兜底：有些文件刀线不是 Spot，而是纯绿 RGB
     if (pathItem.strokeColor.typename == "RGBColor") {
         var c = pathItem.strokeColor;
         return c.green >= 200 && c.red <= 80 && c.blue <= 80;
     }
-
+    if (pathItem.strokeColor.typename == "CMYKColor") {
+        var k = pathItem.strokeColor;
+        return (k.cyan >= 50 && k.yellow >= 50 && k.magenta <= 35 && k.black <= 35) ||
+               (k.magenta >= 70 && k.cyan <= 30 && k.yellow <= 30 && k.black <= 30);
+    }
     return false;
+}
+
+function resizeItemToSize(item, targetW, targetH) {
+    if (!item) return;
+    var bw = Math.abs(item.width), bh = Math.abs(item.height);
+    if (bw <= 0.01 || bh <= 0.01) return;
+    var sx = targetW * 100.0 / bw;
+    var sy = targetH * 100.0 / bh;
+    if (Math.abs(sx - 100.0) < 0.2 && Math.abs(sy - 100.0) < 0.2) return;
+    item.resize(sx, sy, true, true, true, true, (Math.abs(sx) + Math.abs(sy)) / 2.0, Transformation.CENTER);
 }
 
 function doAction() {
@@ -114,7 +157,7 @@ function findAllDieLines() {
         var p = items[j];
         //判断是否是刀线
         if (isDieLineStroke(p)) {
-            if (p.strokeDashes.length == 0 || !p.strokeDashes) {
+            if (!p.strokeDashes || p.strokeDashes.length == 0) {
                 p.selected = true;
             }
             var t = p.textRange;
@@ -127,8 +170,11 @@ function findAllDieLines() {
 function startForDoc(data) {
     currentDoc = null;
     currentCutMap = {};
-    var file = data.replace(";", "/").replace("\\", "/");
+    var file = normalizeFilePath(data);
     var fileO = new File(decodeURI(file));
+    if (!fileO.exists) {
+        return "500;ERR;文件不存在:" + file;
+    }
     currentDoc = app.open(fileO);
     return "200;文件打开成功";
 }
@@ -235,8 +281,11 @@ function saveAs(data) {
     if (!currentDoc) {
         return "1;未找到文档;未找到打开的文档"
     }
-    var file = data.replace(";", "/").replace("\\", "/");
+    var file = normalizeFilePath(data);
     var saveFile = new File(decodeURI(file));
+    try {
+        if (saveFile.parent && !saveFile.parent.exists) saveFile.parent.create();
+    } catch (eCreate) {}
     var pdfSaveOpts = new PDFSaveOptions();
     pdfSaveOpts.compatibility = PDFCompatibility.ACROBAT6;
     pdfSaveOpts.acrobatLayers = true;
@@ -287,42 +336,37 @@ function getArtLines() {
                 }
                 var pw = p.width;
                 var ph = p.height;
-                // 查看这个图像的边和要求的差距是否小于3mm
-                var sizeTol = mm2pt(3, false);
-                var isSameFlip1 = Math.abs(pw - mm2pt(mmL, false)) < sizeTol && Math.abs(ph - mm2pt(mmS, false)) < sizeTol;
-                var isSameFlip2 = Math.abs(pw - mm2pt(mmS, false)) < sizeTol && Math.abs(ph - mm2pt(mmL, false)) < sizeTol;
-                //两个方向只要有一个方向满足要求就执行下面的语句
-                if (isSameFlip1 || isSameFlip2) {
-                    currentLineCount++;
-                    var bounds = p.geometricBounds;
-                    p.name = 'mqx_' + currentLineCount;
-                    currentCutMap[art]['lines'][p.name] = {
-                        index: currentLineCount,
-                        width: pw,
-                        height: ph,
-                        flip: isSameFlip2,
-                        itemsToGroup: [],
-                        itemsIndexToGroup: [],
-                        bounds: {
-                            minX: bounds[0] - mm2pt(mmCx, false),
-                            minY: bounds[3] - mm2pt(mmCx, false),
-                            maxX: bounds[2] + mm2pt(mmCx, false),
-                            maxY: bounds[1] + mm2pt(mmCx, false),
-                        }
-                    };
-                }
+                var isSameFlip1 = Math.abs(pw - mm2pt(mmL, false)) < mm2pt(8, false) && Math.abs(ph - mm2pt(mmS, false)) < mm2pt(8, false);
+                var isSameFlip2 = Math.abs(pw - mm2pt(mmS, false)) < mm2pt(8, false) && Math.abs(ph - mm2pt(mmL, false)) < mm2pt(8, false);
+                var flip = isSameFlip2 && !isSameFlip1;
+                currentLineCount++;
+                var bounds = p.geometricBounds;
+                p.name = 'mqx_' + currentLineCount;
+                currentCutMap[art]['lines'][p.name] = {
+                    index: currentLineCount,
+                    width: pw,
+                    height: ph,
+                    flip: flip,
+                    itemsToGroup: [],
+                    itemsIndexToGroup: [],
+                    bounds: {
+                        minX: bounds[0] - mm2pt(mmCx, false),
+                        minY: bounds[3] - mm2pt(mmCx, false),
+                        maxX: bounds[2] + mm2pt(mmCx, false),
+                        maxY: bounds[1] + mm2pt(mmCx, false),
+                    }
+                };
                
             }
         }
     }
-    var kindSum = 0;
     for (var art in currentCutMap) {
-        kindSum += currentCutMap[art].kinds;
+        var lc = 0;
+        for (var ln in currentCutMap[art]['lines']) lc++;
+        currentCutMap[art].kinds = Math.max(1, lc);
     }
-    var strMsg = "符合尺寸刀线数:" + currentLineCount + ",款数要求：" + kindSum;
-    $.writeln(strMsg);
-    if (currentLineCount != kindSum) {
-        throw new Error("500;刀线不符;刀线数与款数不符,无法处理:" + strMsg);
+    if (currentLineCount <= 0) {
+        throw new Error("500;未识别到刀线");
     }
     //转曲使用副本数组进行处理，实时访问文本类的数据时候length的长度会实时更新所以采用副本处理
     var textFramesArray = [];
@@ -349,8 +393,8 @@ function addNewArt(cx) {
             total_count++;
         }
     }
-    var max_loop = Math.ceil((max_height + mm2pt(2 * cx, false)) * total_count / 4000);
-    var each_loop = Math.ceil(total_count / max_loop);
+    //var max_loop = Math.ceil((max_height + mm2pt(2 * cx, false)) * total_count / 4000);
+    //var each_loop = Math.ceil(total_count / max_loop);
     var i = 0;
     var x1 = 0;
     var maxx = 0;
@@ -553,15 +597,15 @@ function ungroup(obj) {
 
 function main(data) {
     try {
-        startForDoc(data.split(";")[1]);
-        if (!currentDoc) {
-            return "1;未找到文档;未找到打开的文档"
+        var args = parseRunArgs(data);
+        var openRet = startForDoc(args.filePath);
+        if (String(openRet).indexOf("200;") !== 0 || !currentDoc) {
+            return openRet || "1;未找到文档;未找到打开的文档";
         }
         var sum = 0;
-        var cx = +data.split(";")[0]
-        var filePath = data.split(";")[1];
-        var file = filePath.replace(";", "/").replace("\\", "/");
-        var result = file.split("\\");
+        var cx = +args.cx;
+        var filePath = normalizeWinPath(args.filePath);
+        var result = filePath.split("\\");
         var endPath = [];
         for (var i = 0; i < result.length; i++) {
             if (i == (result.length - 1)) {
@@ -569,39 +613,52 @@ function main(data) {
             }
             endPath.push(result[i]);
         }
-        var downPath = endPath.join("\\");
+        var downPath = args.outDir ? normalizeWinPath(args.outDir) : endPath.join("\\");
+        var downFolder = new Folder(normalizeFilePath(downPath));
+        if (!downFolder.exists) {
+            try { downFolder.create(); } catch (eMk) {}
+        }
+        var baseName = result[result.length - 1];
+        var fileMetaName = baseName.substring(0, baseName.lastIndexOf("."));
+        var fileMetaParts = fileMetaName.split("^");
+        var fileDims = fileMetaParts.length > 6 ? parseSizeToken(fileMetaParts[6]) : null;
+        var fileKinds = +(fileMetaParts[2] || 0);
+        if (!(fileKinds > 0)) fileKinds = 1;
+        if (!fileDims) {
+            throw new Error("文件名尺寸格式错误:" + fileMetaName);
+        }
         var artboardsLength = currentDoc.artboards.length;
         if (artboardsLength == 1) {
             currentArtboard = currentDoc.artboards[0];
-            var filename = result[result.length - 1]
-            var failName = filename.substring(0, filename.lastIndexOf("."));
-            var dimensions = failName.split("^")[6].split("x");
-            currentCutMap[failName] = {
-                index: i,
-                mmL: +dimensions[0],
-                mmS: +dimensions[1],
+            currentCutMap[fileMetaName] = {
+                index: 0,
+                mmL: +fileDims[0],
+                mmS: +fileDims[1],
                 mmCx: cx,
-                kinds: +failName.split("^")[2],
-                // kinds: 1,
+                kinds: fileKinds,
                 rect: currentArtboard.artboardRect,
                 lines: {}
             };
-            sum = +failName.split("^")[2] * 2;
+            sum = fileKinds * 2;
         } else {
             for (var i = 0; i < artboardsLength; i++) {
                 currentArtboard = currentDoc.artboards[i];
-                var dimensions = currentArtboard.name.split("^")[6].split("x");
-                currentCutMap[currentArtboard.name] = {
+                var artName = currentArtboard.name;
+                var artParts = String(artName).split("^");
+                var artDims = artParts.length > 6 ? parseSizeToken(artParts[6]) : fileDims;
+                var artKinds = +(artParts[2] || 0);
+                if (!(artKinds > 0)) artKinds = fileKinds;
+                if (!artName || artName.indexOf("^") < 0) artName = fileMetaName + "_ART" + (i + 1);
+                currentCutMap[artName] = {
                     index: i,
-                    mmL: +dimensions[0],
-                    mmS: +dimensions[1],
+                    mmL: +artDims[0],
+                    mmS: +artDims[1],
                     mmCx: cx,
-                    kinds: +currentArtboard.name.split("^")[2],
-                    // kinds: 1,
+                    kinds: artKinds,
                     rect: currentArtboard.artboardRect,
                     lines: {}
                 };
-                sum += +currentArtboard.name.split("^")[2] * 2;
+                sum += artKinds * 2;
             }
         }
         for (var i = currentDoc.layers.length - 1; i >= 0; i--) { //遍历图层
@@ -625,10 +682,35 @@ function main(data) {
         }
         findAllDieLines();
         getArtLines();
-        addNewArt(cx);
         renameAllItems();
-
         groupAllItemByLine();
+
+        sum = 0;
+        for (var art2 in currentCutMap) {
+            for (var line2 in currentCutMap[art2]['lines']) {
+                var cutData = currentCutMap[art2]['lines'][line2];
+                var targetW = mm2pt(currentCutMap[art2].mmL, false);
+                var targetH = mm2pt(currentCutMap[art2].mmS, false);
+                if (cutData.flip) {
+                    var tmp = targetW; targetW = targetH; targetH = tmp;
+                }
+                try { resizeItemToSize(currentDoc.groupItems.getByName("group_" + line2), targetW, targetH); } catch (eResize1) {}
+                try { resizeItemToSize(currentDoc.pathItems.getByName(line2), targetW, targetH); } catch (eResize2) {}
+                var lineObj = currentDoc.pathItems.getByName(line2);
+                var b2 = lineObj.geometricBounds;
+                cutData.width = Math.abs(lineObj.width);
+                cutData.height = Math.abs(lineObj.height);
+                cutData.bounds = {
+                    minX: b2[0] - mm2pt(currentCutMap[art2].mmCx, false),
+                    minY: b2[3] - mm2pt(currentCutMap[art2].mmCx, false),
+                    maxX: b2[2] + mm2pt(currentCutMap[art2].mmCx, false),
+                    maxY: b2[1] + mm2pt(currentCutMap[art2].mmCx, false)
+                };
+            }
+            sum += currentCutMap[art2].kinds * 2;
+        }
+
+        addNewArt(cx);
         moveLineToNewArt(cx) //复制刀线到画板中
         moveAllItemByLine();
 
@@ -650,14 +732,17 @@ function main(data) {
         }
 
         for (var art in currentCutMap) {
-            var kinds = art.split("^")[2];
-            var newFile = downPath + "\\" + art + ".pdf";
+            var kinds = currentCutMap[art].kinds;
+            var newFile = normalizeFilePath(downPath + "\\" + safeOutputName(art) + ".pdf");
             var saveFile = new File(decodeURI(newFile));
+            try {
+                if (saveFile.parent && !saveFile.parent.exists) saveFile.parent.create();
+            } catch (eCreate2) {}
             var pdfSaveOpts = new PDFSaveOptions();
             pdfSaveOpts.compatibility = PDFCompatibility.ACROBAT6;
             pdfSaveOpts.acrobatLayers = true;//保留图层
             pdfSaveOpts.viewAfterSaving = false;//不打开保存的pdf文件
-            pdfSaveOpts.saveMultipleArtboards = false;//只保留选中的艺术板
+            pdfSaveOpts.saveMultipleArtboards = true;//启用多画板导出，配合 artboardRange 输出双页
             pdfSaveOpts.cropToArtboard = true;// 根据艺术板裁剪页面
             pdfSaveOpts.preserveEditability = false;//是否保留AI可编辑性
             pdfSaveOpts.generateThumbnails = true;
@@ -670,25 +755,15 @@ function main(data) {
 
         try {
             currentDoc.close(SaveOptions.DONOTSAVECHANGES);
-        } catch (eClose) {
-
-        }
+        } catch (eClose) {}
         currentDoc = null;
         return "200;OK";
-
     } catch (error) {
         try {
-            if (currentDoc) {
-                currentDoc.close(SaveOptions.DONOTSAVECHANGES);
-            }
-        } catch (e) {
-
-        }
+            if (currentDoc) currentDoc.close(SaveOptions.DONOTSAVECHANGES);
+        } catch (e2) {}
         currentDoc = null;
-        return "500;ERR;" + error;
+        return "500;ERR;" + error + ((error && error.line) ? (" @line=" + error.line) : "");
     } finally {
-
     }
 }
-
-//main("2;D:\\WXWork\\1688857155804169\\Cache\\File\\2026-02\\test1\\亚太旗舰店^河草2005^1^打样^UV转印贴-PET透明底纸^不覆膜,裁切^210x300^1^0^3202853847246951878^SJ2601233892.ai");

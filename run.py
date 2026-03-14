@@ -1,17 +1,18 @@
 # -*- coding: utf-8 -*-
 """
-run.py（PySide6 工程GUI版：AI预处理 + 子进程运行拼图算法 get_best5）
+run.py（PySide6 工程GUI版：源PDF -> AI预处理 + 子进程运行拼图算法 get_best6）
 
-新增（按你的要求，且运行顺序在拼图之前）：
-0) 选择“输入AI文件夹”（也是 JSX 输出 PDF 的目录，也是拼图输入 PDF 的目录）
-1) 自动把该文件夹里所有 .pdf/.PDF 批量改后缀为 .ai（无需手动）
-2) 自动对该文件夹里所有 .ai 执行：cscript //nologo run_ai.vbs AItest_ai.jsx "2;AI全路径;输出目录"
-3) 然后再把该目录中的 PDF（排除 over_test*.pdf）复制/移动到 work 目录
-4) 子进程运行 get_best5 进行拼图
+按你的新要求改成：
+0) 第1个目录：选择“源PDF目录”
+1) 第2个目录：选择“AI目录”（把源PDF复制并改后缀为 .ai 到这里）
+2) 第3~5个目录功能保持不变
+3) 传入第3个目录（work目录）的文件改为：
+   “第1个源PDF目录里，那些对应 AI 经 JSX 处理成功的原始 PDF 文件”
+4) 然后子进程运行 get_best6 进行拼图
 
 ✅ 仅使用 PySide6（已去掉 PyQt5）
 ✅ 已移除“贴二维码”相关全部代码
-✅ 仅调用 get_best5（不再有“全拼/整拼”说法）
+✅ 仅调用 get_best6
 """
 
 import os
@@ -23,8 +24,8 @@ import subprocess
 import re
 from datetime import datetime
 
-# ====== 仅使用 get_best5（必须同目录）======
-import get_best5
+# ====== 仅使用 get_best6（必须同目录）======
+import get_best6
 
 # ---- 强制本进程输出编码，避免混码导致子进程/父进程互相坑 ----
 try:
@@ -57,6 +58,10 @@ def ensure_dir(path):
         os.makedirs(path)
 
 
+def norm_path(p):
+    return os.path.normcase(os.path.normpath(os.path.abspath(p)))
+
+
 def is_output_like_pdf(filename_lower):
     # 排除输出文件，避免重复处理
     if filename_lower.startswith("over_test") and filename_lower.endswith(".pdf"):
@@ -64,35 +69,72 @@ def is_output_like_pdf(filename_lower):
     return False
 
 
-def list_input_pdfs(folder):
-    """列出可作为输入的PDF（排除 over_test*.pdf）"""
+def iter_input_pdf_files(folder, recursive=True):
+    """遍历源PDF（排除 over_test*.pdf）"""
+    if not os.path.isdir(folder):
+        return
+
+    if recursive:
+        for root, _, files in os.walk(folder):
+            for fn in files:
+                lf = fn.lower()
+                if not lf.endswith(".pdf"):
+                    continue
+                if is_output_like_pdf(lf):
+                    continue
+                p = os.path.join(root, fn)
+                if os.path.isfile(p):
+                    yield p
+    else:
+        for fn in os.listdir(folder):
+            lf = fn.lower()
+            if not lf.endswith(".pdf"):
+                continue
+            if is_output_like_pdf(lf):
+                continue
+            p = os.path.join(folder, fn)
+            if os.path.isfile(p):
+                yield p
+
+
+def list_ai_files(folder):
+    """列出 folder 下的 .ai（递归）"""
     if not os.path.isdir(folder):
         return []
     out = []
-    for fn in os.listdir(folder):
-        l = fn.lower()
-        if not l.endswith(".pdf"):
-            continue
-        if is_output_like_pdf(l):
-            continue
-        p = os.path.join(folder, fn)
-        if os.path.isfile(p):
-            out.append(p)
+    for root, _, files in os.walk(folder):
+        for fn in files:
+            if fn.lower().endswith(".ai"):
+                p = os.path.join(root, fn)
+                if os.path.isfile(p):
+                    out.append(p)
     out.sort()
     return out
 
 
-def list_ai_files(folder):
-    """列出 folder 下的 .ai（只扫当前层，不递归；需要递归可改 os.walk）"""
-    if not os.path.isdir(folder):
-        return []
-    out = []
-    for fn in os.listdir(folder):
-        if fn.lower().endswith(".ai"):
-            p = os.path.join(folder, fn)
-            if os.path.isfile(p):
-                out.append(p)
-    out.sort()
+def snapshot_pdf_mtimes(folder):
+    """
+    Snapshot PDF mtimes in a folder (top-level only).
+    Returns: {norm_path: (abs_path, mtime, size)}
+    """
+    out = {}
+    if not folder or (not os.path.isdir(folder)):
+        return out
+    try:
+        names = os.listdir(folder)
+    except Exception:
+        return out
+
+    for fn in names:
+        if not fn.lower().endswith(".pdf"):
+            continue
+        p = os.path.abspath(os.path.join(folder, fn))
+        if not os.path.isfile(p):
+            continue
+        try:
+            out[norm_path(p)] = (p, os.path.getmtime(p), os.path.getsize(p))
+        except Exception:
+            pass
     return out
 
 
@@ -114,7 +156,7 @@ def unique_dest_path(dst_dir, basename):
 
 
 def apply_paths_to_module(mod, dest_dir, archive_dir, out_dir1, out_dir2):
-    """给 get_best5 注入路径。"""
+    """给 get_best6 注入路径。"""
     if hasattr(mod, "set_runtime_paths"):
         try:
             mod.set_runtime_paths(dest_dir, archive_dir, out_dir1, out_dir2)
@@ -149,41 +191,40 @@ def apply_paths_to_module(mod, dest_dir, archive_dir, out_dir1, out_dir2):
 
 
 # -------------------------
-# ✅ PDF -> AI（仅改后缀名）
+# ✅ 源PDF -> AI目录（复制文件并改后缀）
 # -------------------------
-def rename_pdf_to_ai_in_dir(in_dir, recursive=True, overwrite=False, log_cb=None, stop_flag=None):
+def copy_pdf_to_ai_dir(src_pdf_dir, ai_dir, recursive=True, overwrite=False, log_cb=None, stop_flag=None):
     """
-    只做“把 .pdf/.PDF 改成 .ai”：
-    - 不是格式转换，只是改扩展名
+    把 src_pdf_dir 里的 PDF 复制到 ai_dir，并改后缀为 .ai
+    注意：
+    - 不是格式转换，只是复制文件内容并改扩展名
+    - 保留源PDF目录不变
+    - 尽量保持相对目录结构
     """
-    if not os.path.isdir(in_dir):
+    if not os.path.isdir(src_pdf_dir):
         if log_cb:
-            log_cb("[FATAL] not found: %s\n" % in_dir)
-        return {"ok": 0, "skip": 0, "err": 1}
+            log_cb("[FATAL] 源PDF目录不存在: %s\n" % src_pdf_dir)
+        return {"ok": 0, "skip": 0, "err": 1, "pairs": []}
 
-    cnt_ok = cnt_skip = cnt_err = 0
+    ensure_dir(ai_dir)
 
-    def iter_pdf_files():
-        if recursive:
-            for root, _, files in os.walk(in_dir):
-                for fn in files:
-                    lf = fn.lower()
-                    if lf.endswith(".pdf"):
-                        yield os.path.join(root, fn)
-        else:
-            for fn in os.listdir(in_dir):
-                lf = fn.lower()
-                if lf.endswith(".pdf"):
-                    p = os.path.join(in_dir, fn)
-                    if os.path.isfile(p):
-                        yield p
+    cnt_ok = 0
+    cnt_skip = 0
+    cnt_err = 0
+    pairs = []
 
-    for pdf_path in iter_pdf_files():
+    for pdf_path in iter_input_pdf_files(src_pdf_dir, recursive=recursive):
         if stop_flag and stop_flag():
             break
+
         try:
-            base, _ = os.path.splitext(pdf_path)
-            ai_path = base + ".ai"
+            rel = os.path.relpath(pdf_path, src_pdf_dir)
+            rel_no_ext = os.path.splitext(rel)[0] + ".ai"
+            ai_path = os.path.join(ai_dir, rel_no_ext)
+
+            ai_parent = os.path.dirname(ai_path)
+            if ai_parent:
+                ensure_dir(ai_parent)
 
             if os.path.exists(ai_path):
                 if overwrite:
@@ -192,49 +233,87 @@ def rename_pdf_to_ai_in_dir(in_dir, recursive=True, overwrite=False, log_cb=None
                     if log_cb:
                         log_cb("[SKIP exists] %s\n" % ai_path)
                     cnt_skip += 1
+                    pairs.append({
+                        "src_pdf": pdf_path,
+                        "ai_path": ai_path
+                    })
                     continue
 
-            os.replace(pdf_path, ai_path)
+            shutil.copy2(pdf_path, ai_path)
             if log_cb:
                 log_cb("[OK] %s -> %s\n" % (pdf_path, ai_path))
             cnt_ok += 1
+            pairs.append({
+                "src_pdf": pdf_path,
+                "ai_path": ai_path
+            })
+
         except Exception as e:
             if log_cb:
                 log_cb("[ERR] %s  %s\n" % (pdf_path, repr(e)))
             cnt_err += 1
 
     if log_cb:
-        log_cb("[DONE rename] OK=%d SKIP=%d ERR=%d\n" % (cnt_ok, cnt_skip, cnt_err))
-    return {"ok": cnt_ok, "skip": cnt_skip, "err": cnt_err}
+        log_cb("[DONE copy pdf->ai] OK=%d SKIP=%d ERR=%d\n" % (cnt_ok, cnt_skip, cnt_err))
+
+    return {
+        "ok": cnt_ok,
+        "skip": cnt_skip,
+        "err": cnt_err,
+        "pairs": pairs
+    }
 
 
 # -------------------------
 # ✅ 运行 JSX/VBS 批处理 AI
 # -------------------------
-def run_jsx_batch(ai_dir, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_flag=None, proc_setter=None):
+def run_jsx_batch(ai_files, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_flag=None, proc_setter=None):
     """
-    对 ai_dir 下每个 .ai 执行：
+    对给定 ai_files 中每个 .ai 执行：
       cscript //nologo run_ai.vbs AItest_ai.jsx "2;AI全路径;输出目录"
+
+    返回：
+    {
+        "rc": 0/5,
+        "ok_ai": [...],
+        "fail_ai": [...],
+        "ok_count": n,
+        "fail_count": n,
+        "total": n
+    }
     """
     if not os.path.isfile(vbs_path):
         raise RuntimeError("找不到 vbs：%s" % vbs_path)
     if not os.path.isfile(jsx_path):
         raise RuntimeError("找不到 jsx：%s" % jsx_path)
 
-    ai_files = list_ai_files(ai_dir)
+    ai_files = [p for p in (ai_files or []) if p and os.path.isfile(p)]
     if not ai_files:
         if log_cb:
-            log_cb("⚠️ AI目录没有 .ai 文件：%s\n" % ai_dir)
-        return 0
+            log_cb("⚠️ 没有可处理的 .ai 文件。\n")
+        return {
+            "rc": 0,
+            "ok_ai": [],
+            "ok_pdf": [],
+            "fail_ai": [],
+            "ok_count": 0,
+            "fail_count": 0,
+            "total": 0
+        }
 
     total = len(ai_files)
     ok_count = 0
     fail_count = 0
+    ok_ai = []
+    ok_pdf = []
+    ok_pdf_seen = set()
+    fail_ai = []
 
     for i, ai_path in enumerate(ai_files, start=1):
         if stop_flag and stop_flag():
             break
 
+        before_pdf = snapshot_pdf_mtimes(out_dir)
         data = "%s;%s;%s" % (str(cx), ai_path, out_dir)
         cmd = ["cscript", "//nologo", vbs_path, jsx_path, data]
 
@@ -305,42 +384,79 @@ def run_jsx_batch(ai_dir, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_fla
 
         if rc != 0:
             fail_count += 1
+            fail_ai.append(ai_path)
             if log_cb:
                 log_cb("❌ JSX 子进程失败 rc=%s  file=%s\n" % (rc, ai_path))
-            # 单文件失败不终止全批次，继续处理下一个
-            if log_cb:
                 log_cb("⚠️ 跳过失败文件，继续后续文件。\n")
             continue
 
         if ret_failed:
             fail_count += 1
+            fail_ai.append(ai_path)
             if log_cb:
                 log_cb("⚠️ JSX 返回失败，已跳过：file=%s  ret=%s\n" % (ai_path, ret_payload))
             continue
 
         ok_count += 1
+        ok_ai.append(ai_path)
 
-        # 让日志里也能显示总体进度（和你原来的 PROGRESS 机制兼容）
+        after_pdf = snapshot_pdf_mtimes(out_dir)
+        produced_pdf = []
+        for nk, info in after_pdf.items():
+            p_after, mt_after, sz_after = info
+            old = before_pdf.get(nk)
+            if (old is None) or (mt_after > old[1] + 1e-6) or (sz_after != old[2]):
+                produced_pdf.append(p_after)
+        produced_pdf.sort()
+
+        # Fallback: conventional output file name (same basename as AI)
+        if not produced_pdf:
+            expected_pdf = os.path.join(out_dir, os.path.splitext(os.path.basename(ai_path))[0] + ".pdf")
+            if os.path.isfile(expected_pdf):
+                produced_pdf.append(expected_pdf)
+
+        for p_out in produced_pdf:
+            nk = norm_path(p_out)
+            if nk in ok_pdf_seen:
+                continue
+            ok_pdf_seen.add(nk)
+            ok_pdf.append(p_out)
+
+        if log_cb:
+            if produced_pdf:
+                log_cb("JSX导出PDF=%d file=%s\n" % (len(produced_pdf), ai_path))
+            else:
+                log_cb("⚠️ JSX成功但未检测到导出PDF：%s\n" % ai_path)
+
+        # 兼容原来的进度机制
         if log_cb:
             log_cb("PROGRESS: %d / %d\n" % (i, total))
 
     if log_cb:
         log_cb("JSX批处理统计：成功=%d 失败=%d 总数=%d\n" % (ok_count, fail_count, total))
 
-    # 全部失败时返回非0，提醒上层停止
+    rc_final = 0
     if total > 0 and ok_count == 0 and fail_count > 0:
-        return 5
+        rc_final = 5
 
-    return 0
+    return {
+        "rc": rc_final,
+        "ok_ai": ok_ai,
+        "ok_pdf": ok_pdf,
+        "fail_ai": fail_ai,
+        "ok_count": ok_count,
+        "fail_count": fail_count,
+        "total": total
+    }
 
 
 # -------------------------
-# CLI 子进程模式：仅运行 get_best5
+# CLI 子进程模式：仅运行 get_best6
 # -------------------------
 def _cli_run_algo(work_dir, out1, out2):
-    apply_paths_to_module(get_best5, work_dir, work_dir, out1, out2)
-    print("=== RUN get_best5.py (拼图) ===")
-    get_best5.main()
+    apply_paths_to_module(get_best6, work_dir, work_dir, out1, out2)
+    print("=== RUN get_best6.py (拼图) ===")
+    get_best6.main()
     return 0
 
 
@@ -460,13 +576,25 @@ class RunnerThread(QThread):
         self.current_proc = None
         return rc
 
-    def _transfer_input_pdfs(self, src_dir, dst_dir, mode="copy"):
+    def _transfer_selected_files(self, src_files, dst_dir, mode="copy"):
         ensure_dir(dst_dir)
-        files = list_input_pdfs(src_dir)
         moved = []
-        for src_path in files:
+        seen = set()
+
+        for src_path in src_files:
             if self._stop:
                 break
+            if not src_path:
+                continue
+            if not os.path.isfile(src_path):
+                self.sig_log.emit("⚠️ 源文件不存在，跳过：%s\n" % src_path)
+                continue
+
+            k = norm_path(src_path)
+            if k in seen:
+                continue
+            seen.add(k)
+
             base = os.path.basename(src_path)
             dst_path = unique_dest_path(dst_dir, base)
             if mode == "move":
@@ -474,12 +602,14 @@ class RunnerThread(QThread):
             else:
                 shutil.copy2(src_path, dst_path)
             moved.append(dst_path)
+
         return moved
 
     def run(self):
         try:
             cfg = self.cfg
-            ai_dir = cfg["ai_dir"]          # ✅ 你新增的AI目录（也是 PDF 输入/输出目录）
+            src_pdf_dir = cfg["src_pdf_dir"]   # ✅ 第1个目录：源PDF目录
+            ai_dir = cfg["ai_dir"]             # ✅ 第2个目录：AI目录
             test_root = cfg["test_root"]
             out1 = cfg["out1"]
             out2 = cfg["out2"]
@@ -487,7 +617,6 @@ class RunnerThread(QThread):
             cx = cfg.get("cx", 2)
 
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            # 优先使用 run/ 下的稳健版 JSX（对刀线识别与异常容错更好）
             jsx_path = os.path.join(script_dir, "run", "AItest_ai.jsx")
             if not os.path.isfile(jsx_path):
                 jsx_path = os.path.join(script_dir, "AItest_ai.jsx")
@@ -496,6 +625,7 @@ class RunnerThread(QThread):
             self.sig_status.emit("Running", "Preparing")
             self.sig_progress.emit(0.0)
 
+            ensure_dir(ai_dir)
             ensure_dir(test_root)
             ensure_dir(out1)
             ensure_dir(out2)
@@ -505,7 +635,8 @@ class RunnerThread(QThread):
             ensure_dir(work_dir)
 
             self.sig_log.emit("=== CONFIG ===\n")
-            self.sig_log.emit("AI目录（PDF->AI + JSX导出PDF + 拼图输入PDF）: %s\n" % ai_dir)
+            self.sig_log.emit("源PDF目录 SRC_PDF_DIR                  : %s\n" % src_pdf_dir)
+            self.sig_log.emit("AI目录 AI_DIR                        : %s\n" % ai_dir)
             self.sig_log.emit("工作目录 TEST_DIR(work)               : %s\n" % work_dir)
             self.sig_log.emit("输出拼图 DEST_DIR1                   : %s\n" % out1)
             self.sig_log.emit("输出刀线 DEST_DIR2                   : %s\n" % out2)
@@ -513,19 +644,22 @@ class RunnerThread(QThread):
             self.sig_log.emit("JSX                                  : %s\n" % jsx_path)
             self.sig_log.emit("VBS                                  : %s\n" % vbs_path)
             self.sig_log.emit("CX                                   : %s\n" % str(cx))
-            self.sig_log.emit("运行算法 ALGO                         : get_best5 (拼图)\n")
+            self.sig_log.emit("运行算法 ALGO                         : get_best6 (拼图)\n")
             self.sig_log.emit("================\n\n")
 
-            if not os.path.isdir(ai_dir):
-                self.sig_log.emit("❌ AI目录不存在：%s\n" % ai_dir)
+            if not os.path.isdir(src_pdf_dir):
+                self.sig_log.emit("❌ 源PDF目录不存在：%s\n" % src_pdf_dir)
                 self.sig_done.emit(2)
                 return
 
-            # 1) ✅ PDF -> AI（改后缀）
+            # 1) 源PDF -> AI目录（复制并改后缀）
             self.sig_status.emit("Running", "PDF->AI")
-            self.sig_log.emit("=== STEP1: RENAME .PDF -> .AI (just extension) ===\n")
-            rename_pdf_to_ai_in_dir(
-                ai_dir, recursive=True, overwrite=False,
+            self.sig_log.emit("=== STEP1: COPY SOURCE PDF -> AI DIR (.ai extension) ===\n")
+            prep = copy_pdf_to_ai_dir(
+                src_pdf_dir=src_pdf_dir,
+                ai_dir=ai_dir,
+                recursive=True,
+                overwrite=False,
                 log_cb=lambda s: self.sig_log.emit(s),
                 stop_flag=lambda: self._stop
             )
@@ -534,15 +668,29 @@ class RunnerThread(QThread):
                 self.sig_done.emit(0)
                 return
 
-            # 2) ✅ 执行 JSX 批处理（导出 PDF 到同一目录）
+            pairs = prep.get("pairs", [])
+            if not pairs:
+                self.sig_log.emit("⚠️ 源PDF目录中没有可处理的 PDF。\n")
+                self.sig_done.emit(0)
+                return
+
+            ai_files_to_run = [x["ai_path"] for x in pairs if x.get("ai_path")]
+            ai_to_src_map = {}
+            for x in pairs:
+                sp = x.get("src_pdf", "")
+                ap = x.get("ai_path", "")
+                if sp and ap:
+                    ai_to_src_map[norm_path(ap)] = sp
+
+            # 2) 执行 JSX 批处理
             self.sig_status.emit("Running", "AI->PDF (JSX)")
             self.sig_log.emit("\n=== STEP2: RUN JSX (AI -> PDF export) ===\n")
-            rc_jsx = run_jsx_batch(
-                ai_dir=ai_dir,
+            jsx_res = run_jsx_batch(
+                ai_files=ai_files_to_run,
                 cx=cx,
                 vbs_path=vbs_path,
                 jsx_path=jsx_path,
-                out_dir=ai_dir,  # ✅ 输出PDF目录=AI目录（你要求：PDF输入目录就是 JSX 输出目录）
+                out_dir=ai_dir,
                 log_cb=lambda s: self.sig_log.emit(s),
                 stop_flag=lambda: self._stop,
                 proc_setter=self._set_current_proc
@@ -551,29 +699,54 @@ class RunnerThread(QThread):
                 self.sig_log.emit("⛔ 已停止：JSX阶段中断。\n")
                 self.sig_done.emit(0)
                 return
+
+            rc_jsx = jsx_res.get("rc", 0)
             if rc_jsx != 0:
                 self.sig_log.emit("❌ JSX 执行失败 rc=%s\n" % rc_jsx)
                 self.sig_done.emit(rc_jsx)
                 return
 
-            # 3) ✅ 检查 JSX 导出的 PDF
-            pdfs_now = list_input_pdfs(ai_dir)
-            if not pdfs_now:
-                self.sig_log.emit("\n⚠️ JSX运行后未发现可处理PDF（排除 over_test*.pdf）：%s\n" % ai_dir)
+            ok_ai = jsx_res.get("ok_ai", [])
+            jsx_export_pdfs = [p for p in (jsx_res.get("ok_pdf", []) or []) if p and os.path.isfile(p)]
+            success_src_pdfs = []
+            for ai_path in ok_ai:
+                src_pdf = ai_to_src_map.get(norm_path(ai_path))
+                if src_pdf and os.path.isfile(src_pdf):
+                    success_src_pdfs.append(src_pdf)
+
+            if jsx_export_pdfs:
+                success_src_pdfs = jsx_export_pdfs
+                self.sig_log.emit("JSX导出PDF数量：%d\n" % len(success_src_pdfs))
+            else:
+                self.sig_log.emit("⚠️ 未检测到JSX导出PDF，回退使用源PDF。\n")
+
+            if not success_src_pdfs:
+                self.sig_log.emit("\n⚠️ 没有 JSX 成功对应的源PDF可传入 work 目录。\n")
                 self.sig_done.emit(0)
                 return
 
-            # 4) Transfer PDF 到 work
+            self.sig_log.emit("JSX成功对应的源PDF数量：%d\n" % len(success_src_pdfs))
+
+            # 3) 把“第1个目录里成功对应的源PDF”传到 work
             self.sig_status.emit("Running", "Transfer")
-            self.sig_log.emit("\n=== STEP3: TRANSFER INPUT PDFS ===\n")
-            moved = self._transfer_input_pdfs(ai_dir, work_dir, mode=("move" if mode == "move" else "copy"))
-            self.sig_log.emit("传输完成：%d 个PDF\n\n" % len(moved))
+            self.sig_log.emit("\n=== STEP3: TRANSFER INPUT PDFS TO WORK ===\n")
+            moved = self._transfer_selected_files(
+                success_src_pdfs,
+                work_dir,
+                mode=("move" if mode == "move" else "copy")
+            )
+            self.sig_log.emit("传输完成：%d 个源PDF进入 work 目录\n\n" % len(moved))
             if self._stop:
                 self.sig_log.emit("⛔ 已停止：不再继续运行算法。\n")
                 self.sig_done.emit(0)
                 return
 
-            # 5) Algo subprocess
+            if not moved:
+                self.sig_log.emit("⚠️ 没有文件进入 work 目录，停止运行算法。\n")
+                self.sig_done.emit(0)
+                return
+
+            # 4) Algo subprocess
             self.sig_status.emit("Running", "Algorithm")
             self.sig_log.emit("=== STEP4: RUN ALGO (SUBPROCESS) ===\n")
             cmd_algo = [
@@ -606,8 +779,8 @@ class RunnerThread(QThread):
 class HelpDialog(QDialog):
     def __init__(self, parent=None):
         super(HelpDialog, self).__init__(parent)
-        self.setWindowTitle("说明：AI预处理 + 拼图运行器")
-        self.resize(900, 560)
+        self.setWindowTitle("说明：源PDF -> AI预处理 + 拼图运行器")
+        self.resize(920, 580)
 
         layout = QVBoxLayout(self)
         self.txt = QTextEdit(self)
@@ -620,16 +793,17 @@ class HelpDialog(QDialog):
         layout.addWidget(btn, alignment=Qt.AlignRight)
 
         help_text = (
-            "【运行顺序（严格按此顺序）】\n"
-            "1）选择“输入AI文件夹”（也是 JSX 导出 PDF 的目录，也是拼图输入 PDF 的目录）\n"
-            "2）自动把该目录里所有 .pdf/.PDF 改后缀为 .ai（仅改扩展名，不是格式转换）\n"
-            "3）对每个 .ai 执行：cscript //nologo run_ai.vbs AItest_ai.jsx \"2;AI全路径;输出目录\"\n"
-            "4）把该目录里导出的 PDF（排除 over_test*.pdf）复制/移动到 work 目录\n"
-            "5）子进程运行 get_best5 进行拼图输出\n\n"
+            "【运行顺序（已按你要求修改）】\n"
+            "1）第1个目录选择：源PDF目录\n"
+            "2）第2个目录选择：AI目录\n"
+            "3）程序会把第1个目录中的 PDF 复制到第2个目录，并改后缀为 .ai（仅改扩展名，不是格式转换）\n"
+            "4）对这些 .ai 执行：cscript //nologo run_ai.vbs AItest_ai.jsx \"2;AI全路径;输出目录\"\n"
+            "5）把“JSX成功对应的第1个目录中的原始 PDF”复制/移动到 work 目录\n"
+            "6）子进程运行 get_best6 进行拼图输出\n\n"
             "【注意】\n"
             "- run.py、AItest_ai.jsx、run_ai.vbs 必须在同一目录\n"
-            "- 若 JSX 需要动态 OUT_DIR，请按我给你的“JSX最小改法”改一行\n"
-            "- 进度条：JSX阶段会输出 PROGRESS: a / b；算法阶段若 get_best5 也输出 PROGRESS，会继续更新\n"
+            "- JSX 输出目录仍然是第2个 AI 目录\n"
+            "- 传入 work 的不再是第2个目录导出的 PDF，而是第1个目录中成功对应的原始 PDF\n"
         )
         self.txt.setPlainText(help_text)
 
@@ -641,7 +815,7 @@ class RollWidget(QWidget):
     def __init__(self):
         super(RollWidget, self).__init__()
 
-        self.setWindowTitle("印客链 - AI预处理 + 拼图运行器")
+        self.setWindowTitle("印客链 - 源PDF -> AI预处理 + 拼图运行器")
 
         ico_path = r"C:\Users\wzqy\PycharmProjects\inklink\icon.ico"
         if os.path.isfile(ico_path):
@@ -650,15 +824,15 @@ class RollWidget(QWidget):
             except Exception:
                 pass
 
-        self.resize(1100, 780)
+        self.resize(1120, 800)
         self.worker = None
 
         self._build_ui()
         self._apply_qss()
 
         # 默认值
+        self.ed_src_pdf.setText(r"D:\test_data\src")
         self.ed_ai.setText(r"D:\test_data\iest")
-        self.ed_dest.setText(self.ed_ai.text().strip())
         self.ed_test.setText(r"D:\test_data\test")
         self.ed_out1.setText(r"D:\test_data\gest")
         self.ed_out2.setText(r"D:\test_data\pest")
@@ -739,11 +913,11 @@ class RollWidget(QWidget):
         hl.setSpacing(12)
 
         title_box = QVBoxLayout()
-        lb_title = QLabel("印客链 - AI预处理 + 拼图运行器")
+        lb_title = QLabel("印客链 - 源PDF -> AI预处理 + 拼图运行器")
         f = QFont("Microsoft YaHei UI", 18)
         f.setBold(True)
         lb_title.setFont(f)
-        lb_sub = QLabel("顺序：PDF->AI（改后缀）→ JSX导出PDF → 子进程拼图 get_best5")
+        lb_sub = QLabel("顺序：源PDF目录 -> AI目录(.ai) -> JSX成功对应的源PDF传入work -> 子进程拼图 get_best6")
         lb_sub.setStyleSheet("color:#94a3b8;")
         title_box.addWidget(lb_title)
         title_box.addWidget(lb_sub)
@@ -795,14 +969,13 @@ class RollWidget(QWidget):
             grid.addWidget(btn, r, 2)
             return ed
 
-        # ✅ 新增：AI目录（也是 PDF 输入/输出目录）
-        self.ed_ai = add_path_row(0, "输入AI目录（=JSX输出PDF目录=拼图输入PDF目录）")
-        self.ed_ai.textChanged.connect(self._sync_dest_to_ai)
+        # ✅ 第1个目录：源PDF目录
+        self.ed_src_pdf = add_path_row(0, "源PDF目录")
 
-        # PDF输入目录：自动同步显示（只读）
-        self.ed_dest = add_path_row(1, "输入PDF目录（自动=AI目录）", pick=False)
-        self.ed_dest.setReadOnly(True)
+        # ✅ 第2个目录：AI目录
+        self.ed_ai = add_path_row(1, "AI目录（源PDF复制改后缀到这里）")
 
+        # ✅ 第3~5个保持不变
         self.ed_test = add_path_row(2, "工作根目录")
         self.ed_out1 = add_path_row(3, "输出拼图目录")
         self.ed_out2 = add_path_row(4, "输出刀线目录")
@@ -851,7 +1024,7 @@ class RollWidget(QWidget):
         hb.addWidget(self.btn_clear)
         left_layout.addWidget(gp_btn)
 
-        tip = QLabel("提示：AI目录会自动作为PDF输入/输出目录；JSX/VBS需与run.py同目录。")
+        tip = QLabel("提示：第1个目录是源PDF，第2个目录是AI目录，传入work的是第1个目录中成功对应的原始PDF。")
         tip.setStyleSheet("color:#94a3b8;")
         left_layout.addWidget(tip)
         left_layout.addStretch(1)
@@ -875,10 +1048,7 @@ class RollWidget(QWidget):
         right_layout.addWidget(gp_log)
         splitter.addWidget(right)
 
-        splitter.setSizes([440, 660])
-
-    def _sync_dest_to_ai(self):
-        self.ed_dest.setText(self.ed_ai.text().strip())
+        splitter.setSizes([460, 660])
 
     def _pick_dir(self, line_edit: QLineEdit):
         d = QFileDialog.getExistingDirectory(self, "选择文件夹", line_edit.text().strip() or os.getcwd())
@@ -891,7 +1061,7 @@ class RollWidget(QWidget):
 
     def _set_progress_indeterminate(self, on: bool):
         if on:
-            self.pb.setRange(0, 0)   # busy
+            self.pb.setRange(0, 0)
         else:
             self.pb.setRange(0, 100)
 
@@ -930,17 +1100,16 @@ class RollWidget(QWidget):
         elif "⛔" in line:
             color = "#fbbf24"
 
-        # 阶段推断（用于进度条 busy）
         if "STEP1:" in line:
             self._set_status("Running", "PDF->AI")
             self._set_progress_indeterminate(True)
         elif "STEP2:" in line:
             self._set_status("Running", "AI->PDF (JSX)")
             self._set_progress_indeterminate(True)
-        elif "STEP3:" in line or "=== STEP3" in line:
+        elif "STEP3:" in line:
             self._set_status("Running", "Transfer")
             self._set_progress_indeterminate(True)
-        elif "STEP4:" in line or "=== STEP4" in line:
+        elif "STEP4:" in line:
             self._set_status("Running", "Algorithm")
             self._set_progress_indeterminate(True)
 
@@ -950,19 +1119,24 @@ class RollWidget(QWidget):
         if self.worker is not None:
             return
 
+        src_pdf_dir = self.ed_src_pdf.text().strip()
         ai_dir = self.ed_ai.text().strip()
         test_root = self.ed_test.text().strip()
         out1 = self.ed_out1.text().strip()
         out2 = self.ed_out2.text().strip()
         mode = self._get_mode_value()
 
-        if not os.path.isdir(ai_dir):
-            QMessageBox.critical(self, "错误", "输入AI目录不存在：\n" + ai_dir)
+        if not os.path.isdir(src_pdf_dir):
+            QMessageBox.critical(self, "错误", "源PDF目录不存在：\n" + src_pdf_dir)
+            return
+        if not ai_dir:
+            QMessageBox.critical(self, "错误", "AI目录不能为空")
             return
         if not test_root:
             QMessageBox.critical(self, "错误", "工作根目录不能为空")
             return
 
+        ensure_dir(ai_dir)
         ensure_dir(test_root)
         ensure_dir(out1)
         ensure_dir(out2)
@@ -976,12 +1150,13 @@ class RollWidget(QWidget):
         self.clear_log()
 
         cfg = {
+            "src_pdf_dir": src_pdf_dir,
             "ai_dir": ai_dir,
             "test_root": test_root,
             "out1": out1,
             "out2": out2,
             "mode": mode,
-            "cx": 2,   # 你给的 data 前缀就是 2；需要改就改这里
+            "cx": 2,
         }
 
         self.worker = RunnerThread(cfg)

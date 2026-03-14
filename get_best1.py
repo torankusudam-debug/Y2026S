@@ -1,48 +1,12 @@
-# -*- coding: utf-8 -*-
-"""
-拼图/拼版脚本（双输出版：图形页 + 轮廓页）
-
-【当前版本规则】
-1. 仅保留“混拼”
-   - 只有 N < 10 的文件进入混拼
-   - N >= 10 的文件直接跳过
-
-2. 纸张与间距
-   - 纸张宽度：600mm
-   - 图与图间距：10mm
-   - 左右边距：5mm
-   - 上边距：10mm
-   - 下边距：5mm
-
-3. 混拼规则
-   - 优先旋转，让单块宽 <= 315mm
-   - 如果旋转后仍 >315，则允许该块跨越 320 分区
-   - 到达/跨过 320mm 时，中间保留 10mm 空带（320~330）
-   - 高度方向每跨过 464mm，插入 10mm 间隙
-
-4. 刀线规则
-   - 顶部：只给“最顶部那一批块”画顶部刀线
-   - 左侧：只给“最左侧那一批块”画左侧刀线
-   - 内部块不画刀线，避免杂乱
-   - 左侧刀线上边界下移到图片区顶部，使二维码/标签显示在刀线上方
-
-5. 输出
-   - gest：图形页
-   - pest：轮廓页
-"""
-
 import os
 import re
 import math
 import time
 import shutil
-import hashlib
 from io import BytesIO
-
 import fitz
 import numpy as np
 from PIL import Image
-
 try:
     import cv2
     CV2_OK = True
@@ -60,17 +24,39 @@ try:
     PIL_DRAW_OK = True
 except Exception:
     PIL_DRAW_OK = False
-
-
-# =========================
-# 路径（可由 run.py 动态注入）
-# =========================
 DEST_DIR = r"D:\test_data\dest"
 IN_PDF_ARCHIVE_DIR = r"D:\test_data\test"
 DEST_DIR1 = r"D:\test_data\gest"
 DEST_DIR2 = r"D:\test_data\pest"
+OUTER_EXT = 2.0                              # 外接框扩张毫米数，裁剪时在自动识别的 bbox 基础上额外扩张，避免裁得太紧。过大可能导致多余空白，过小可能裁得太紧。2mm 大约等于 5-6 像素（在 600 DPI 下），是一个较好的平衡点。
+CELL_GAP_MM = 10.0                           # 图与图之间的间距
+MARGIN_LR_MM = 5.0                           # 左右边距
+MARGIN_TOP_MM = 10.0                         # 上边距
+MARGIN_BOTTOM_MM = 5.0                       # 下边距
+INNER_MARGIN_MM = 0.0                        # 图块内部边距，裁剪时在每个图块内额外保留的空白，避免内容过于靠近边缘。过大可能导致图块尺寸不够用，过小可能导致内容太靠近边缘。0mm 表示不额外保留空白，直接裁到识别的 bbox 边界，是一个较为激进的设置。
+MARK_LEN = 5.0                               # 刀线/刻度长度，单位毫米。过长可能导致刀线过于显眼，过短可能不够明显。5mm 是一个较好的平衡点。
+PAGE_W = 600.0                               # 页面宽度
+PAGE_H_MAX = 1500.0                          # 页面最大高度，超过则分成多页
+PAGE_MARGIN_L = MARGIN_LR_MM                 
+PAGE_MARGIN_R = MARGIN_LR_MM
+SPLIT_X = 320.0                              # 320mm 处的分界线，超过则跨页；不足则混拼在同一页
+SPLIT_GAP_W = 10.0                           # 分界线保留的空白宽度(320~330)，跨页时中间留空；混拼时不留空
+QR_BAND = MARGIN_TOP_MM
+QR_W = 10.0                                  # 二维码宽度
+QR_H = 10.0                                  # 二维码高度
+LABEL_FONT_SIZE = 10                         # 标签字体大小(单位pt)，会自动按块宽度截断文字，避免超出边界
+RENDER_DPI = 600                             # PDF渲染分辨率，单位 DPI。过低可能导致结构识别不准确，过高则处理慢且占内存。600 是一个较好的平衡点。                
+CROP_PAD_MM = 1.2                            # 裁剪时在 bbox 四周额外扩张的毫米数，避免裁得太紧。过大可能导致多余空白，过小可能裁得太紧。1.2mm 大约等于 3-4 像素（在 600 DPI 下），是一个较好的平衡点。
+TEXT_MASK_PAD_MM = 1.2                       # 文本区域扩张的毫米数，用于在渲染图上涂白文本区域，避免被误识别为图形。过大可能导致过多图形被遮盖，过小可能遮盖不全。1.2mm 大约等于 3-4 像素（在 600 DPI 下），是一个较好的平衡点。
+SAFE_PAD_MM = 3.0                            # 安全边距毫米数，用于在最终输出的图块中保留额外的空白，避免内容过于靠近边缘。过大可能导致图块尺寸不够用，过小可能导致内容太靠近边缘。3mm 大约等于 7-8 像素（在 600 DPI 下），是一个较好的平衡点。
+DRAW_PART_OUTER_BOX = False
+MIX_ENABLE = True
+MIX_THRESHOLD = 10  # N < 10 -> mix；N >= 10 -> skip
 
+LEFT_BLOCK_W = float(SPLIT_X - PAGE_MARGIN_L)  # 315
+TOTAL_USABLE_W = float((PAGE_W - PAGE_MARGIN_R) - PAGE_MARGIN_L)  # 590
 
+EDGE_SNAP_MM = 10.0                          # 刀线吸边毫米数，允许刀线自动吸附到边界，避免出现残缺的刀线。过大可能导致刀线位置不合理，过小可能无法有效吸边。10mm 大约等于 24 像素（在 600 DPI 下），是一个较好的平衡点。
 def set_runtime_paths(dest_dir, archive_dir, out_dir1, out_dir2):
     """
     功能：
@@ -82,114 +68,38 @@ def set_runtime_paths(dest_dir, archive_dir, out_dir1, out_dir2):
     DEST_DIR1 = str(out_dir1)
     DEST_DIR2 = str(out_dir2)
 
-
-# =========================
-# 参数
-# =========================
-OUTER_EXT = 2.0
-
-CELL_GAP_MM = 10.0
-
-MARGIN_LR_MM = 5.0
-MARGIN_TOP_MM = 10.0
-MARGIN_BOTTOM_MM = 5.0
-
-INNER_MARGIN_MM = 0.0
-
-MARK_LEN = 5.0
-PAGE_W = 600.0
-PAGE_H_MAX = 1500.0
-
-PAGE_MARGIN_L = MARGIN_LR_MM
-PAGE_MARGIN_R = MARGIN_LR_MM
-
-SPLIT_X = 320.0
-SPLIT_GAP_W = 10.0
-
-QR_BAND = MARGIN_TOP_MM
-QR_W = 10.0
-QR_H = 10.0
-
-LABEL_FONT_SIZE = 10
-RENDER_DPI = 600
-CROP_PAD_MM = 1.2
-TEXT_MASK_PAD_MM = 1.2
-SAFE_PAD_MM = 3.0
-
-DRAW_PART_OUTER_BOX = False
-
-MIX_ENABLE = True
-MIX_THRESHOLD = 10  # N < 10 -> mix；N >= 10 -> skip
-
-LEFT_BLOCK_W = float(SPLIT_X - PAGE_MARGIN_L)  # 315
-TOTAL_USABLE_W = float((PAGE_W - PAGE_MARGIN_R) - PAGE_MARGIN_L)  # 590
-
-EDGE_SNAP_MM = 10.0
-
-
-# =========================
-# 基础工具
-# =========================
-def ensure_dir(p):
-    """
-    功能：
-    确保目录存在；如果目录不存在则自动创建。
-    """
-    if p and (not os.path.isdir(p)):
-        os.makedirs(p)
-
+def ensure_dir(p):                            # 确保目录存在的工具函数，避免重复代码
+    if p and (not os.path.isdir(p)):          # 避免p为空或已存在但不是目录的情况
+        os.makedirs(p)                        # 创建目录
 
 def mm_to_pt(mm):
-    """
-    功能：
-    毫米 -> PDF point（1 inch = 72 pt，1 inch = 25.4 mm）。
-    用于在 PDF 页面上绘图或放置图片时做单位转换。
-    """
-    return mm * 72.0 / 25.4
+    return mm * 72.0 / 25.4                   # mm 转 pt 的公式，72.0/25.4 是一个常数约等于 2.83465
 
+def mm_to_px(mm, dpi):                        # 当前版本中未直接使用，保留以便后续需要时调用
+    return int(round(mm * dpi / 25.4))        # mm 转 px 的公式，dpi/25.4 是一个常数约等于 23.62205（在 600 DPI 下）
 
-def mm_to_px(mm, dpi):
-    """
-    功能：
-    毫米 -> 像素，用于位图渲染和裁剪。
-    """
-    return int(round(mm * dpi / 25.4))
-
-
-def _log(log_cb, s):
-    """
-    功能：
-    统一日志输出。
-    - 若传入 log_cb，则回调输出
-    - 否则直接 print
-    """
-    if log_cb:
-        log_cb(s)
+def _log(log_cb, s):                          # 统一的日志输出函数，接受一个 log_cb 回调函数和一个字符串 s
+    if log_cb:                                # 仅当 log_cb 不为 None 时才调用，避免传入非函数类型导致错误                           
+        log_cb(s)                             # 回调输出日志，允许外部 run.py 捕获并统一管理日志
     else:
-        print(s)
+        print(s)                              # 直接打印日志，适用于没有传入 log_cb 的情况
 
-
-def clamp_bbox(x0, y0, x1, y1, img_w, img_h):
-    """
-    功能：
-    将 bbox 限制在图像边界内，避免裁剪越界。
-    """
+def clamp_bbox(x0, y0, x1, y1, img_w, img_h): # 将 bbox 坐标限制在图像边界内，避免裁剪越界。过大可能导致越界错误，过小可能导致内容被裁掉。这个函数会确保 bbox 至少有 1 像素的宽高，并且完全在图像范围内。
     x0 = max(0, min(img_w - 1, int(round(x0))))
     y0 = max(0, min(img_h - 1, int(round(y0))))
     x1 = max(x0 + 1, min(img_w, int(round(x1))))
     y1 = max(y0 + 1, min(img_h, int(round(y1))))
     return x0, y0, x1, y1
 
-
-def union_bbox(b1, b2):
+def union_bbox(b1, b2):                       #  
     """
     功能：
-    合并两个 bbox，返回它们的并集。
+    合并两个 bbox,返回它们的并集。
     任意一个为 None 时，返回另一个。
     """
-    if b1 is None:
+    if b1 is None:                            # 如果 b1 是 None，直接返回 b2，无需计算
         return b2
-    if b2 is None:
+    if b2 is None:                            # 如果 b2 是 None，直接返回 b1，无需计算
         return b1
     return (
         min(b1[0], b2[0]),
@@ -198,122 +108,61 @@ def union_bbox(b1, b2):
         max(b1[3], b2[3]),
     )
 
-
-def rect_union(rects):
-    """
-    功能：
-    合并一组 fitz.Rect，返回整体外接矩形。
-    """
-    rects = [r for r in rects if r is not None]
-    if not rects:
+def rect_union(rects):                        
+    rects = [r for r in rects if r is not None] # 过滤掉 None 的矩形，避免计算错误
+    if not rects:                               # 如果没有有效的矩形，返回 None，表示没有区域
         return None
-    x0 = min(r.x0 for r in rects)
-    y0 = min(r.y0 for r in rects)
-    x1 = max(r.x1 for r in rects)
-    y1 = max(r.y1 for r in rects)
-    return fitz.Rect(x0, y0, x1, y1)
-
+    x0 = min(r.x0 for r in rects)               # 计算所有矩形的最小 x0，作为外接矩形的左边界
+    y0 = min(r.y0 for r in rects)               # 计算所有矩形的最小 y0，作为外接矩形的上边界
+    x1 = max(r.x1 for r in rects)               # 计算所有矩形的最大 x1，作为外接矩形的右边界
+    y1 = max(r.y1 for r in rects)               # 计算所有矩形的最大 y1，作为外接矩形的下边界
+    return fitz.Rect(x0, y0, x1, y1)            # 返回一个新的 fitz.Rect，表示所有输入矩形的外接矩形
 
 def archive_input_pdf_to_dir(src_pdf_path, dst_dir):
-    """
-    功能：
-    将输入 PDF 复制归档到测试目录中。
-    - 若源路径与目标路径相同，则直接返回
-    - 若已存在同名且大小相同，则直接复用
-    - 若存在同名但不同内容，则自动加时间戳重命名
-    """
-    os.makedirs(dst_dir, exist_ok=True)
-    base = os.path.basename(src_pdf_path)
-    dst_path = os.path.join(dst_dir, base)
+    os.makedirs(dst_dir, exist_ok=True)       # 确保目标目录存在，避免后续复制文件时出错
+    base = os.path.basename(src_pdf_path)     # 获取源 PDF 的文件名，保留扩展名，用于构造目标路径
+    dst_path = os.path.join(dst_dir, base)    # 构造目标路径，初始假设与源文件同名，后续会根据情况调整
 
     try:
-        if os.path.abspath(src_pdf_path).lower() == os.path.abspath(dst_path).lower():
+        if os.path.abspath(src_pdf_path).lower() == os.path.abspath(dst_path).lower():   # 比较源路径和目标路径的绝对路径（忽略大小写），如果相同则直接返回目标路径，无需复制
             return dst_path
     except Exception:
         pass
 
-    if os.path.exists(dst_path):
+    if os.path.exists(dst_path):              # 如果目标路径已存在，可能是之前复制过的文件，需要检查是否与源文件相同
         try:
-            if os.path.getsize(dst_path) == os.path.getsize(src_pdf_path):
+            if os.path.getsize(dst_path) == os.path.getsize(src_pdf_path):              
+             # 如果目标文件和源文件大小相同，基本可以认为是同一个文件，直接复用目标路径，无需复制
                 return dst_path
         except Exception:
             pass
-        name, ext = os.path.splitext(base)
-        ts = time.strftime("%Y%m%d_%H%M%S")
-        dst_path = os.path.join(dst_dir, "%s_%s%s" % (name, ts, ext))
+        name, ext = os.path.splitext(base)    # 如果目标文件存在但与源文件不同，则需要重命名目标文件，避免覆盖。这里使用当前时间戳来生成一个唯一的文件名，格式为 "原文件名_年月日_时分秒.扩展名"，确保不会与现有文件冲突。
+        ts = time.strftime("%Y%m%d_%H%M%S")   # 生成当前时间的字符串，格式为 "年月日_时分秒"，例如 "20240601_153045"，用于构造新的文件名
+        # 构造新的目标路径，格式为 "目标目录/原文件名_时间戳.扩展名"，例如 "D:/test_data/test/图纸_20240601_153045.pdf"，确保不会覆盖现有文件
+        dst_path = os.path.join(dst_dir, "%s_%s%s" % (name, ts, ext))                    
 
-    shutil.copy2(src_pdf_path, dst_path)
+    shutil.copy2(src_pdf_path, dst_path)      # 复制源 PDF 到目标路径，使用 copy2 保留文件的元数据（如修改时间等），确保归档后的文件与原文件尽可能一致
     return dst_path
 
-
-def _sanitize_filename_for_windows(name_no_ext, max_len=160):
-    """
-    功能：
-    清洗 Windows 不允许的文件名字符，并限制总长度。
-    这个函数当前版本里未直接使用，但保留以便后续扩展输出文件命名。
-    """
-    s = str(name_no_ext)
-    s = s.replace("\\", "_").replace("/", "_").replace(":", "_").replace("*", "_").replace("?", "_").replace('"', "_")
-    s = s.replace("<", "_").replace(">", "_").replace("|", "_")
-    if len(s) <= max_len:
-        return s
-    h = hashlib.md5(s.encode("utf-8", "ignore")).hexdigest()[:10]
-    keep = max(40, max_len - 11)
-    return s[:keep] + "_" + h
-
-
-# =========================
-# 刀线/刻度
-# =========================
-def _draw_left_edge_tick(page, y_mm, tick_len_mm=MARK_LEN, lw=1.0):
-    """
-    功能：
-    在纸张最左侧画一条水平短刀线（从左边缘往右伸）。
-    """
-    ypt = mm_to_pt(float(y_mm))
-    tick = mm_to_pt(float(tick_len_mm))
+def _draw_left_edge_tick(page, y_mm, tick_len_mm=MARK_LEN, lw=1.0):    # 在纸张最左侧画一条水平短刀线（从左边缘往右伸）
+    ypt = mm_to_pt(float(y_mm))                                        # 将 y_mm 转换为 PDF 坐标系中的 pt 单位，fitz 使用的坐标系是以左上角为原点，单位为 pt（1/72 英寸），因此需要将毫米转换为 pt 来正确定位刀线位置
+    tick = mm_to_pt(float(tick_len_mm))                                # 将 tick_len_mm 转换为 pt 单位，表示刀线的长度，确保在 PDF 中正确显示
+    # 在 PDF 页面上绘制一条线段，起点是 (0, ypt)，终点是 (tick, ypt)，颜色为黑色，线宽为 lw。这样就形成了一条从左边缘向右伸展的水平短刀线，位置由 y_mm 决定，长度由 tick_len_mm 决定。
     page.draw_line(fitz.Point(0, ypt), fitz.Point(tick, ypt), color=(0, 0, 0), width=lw)
 
-
-def _draw_top_edge_tick(page, x_mm, tick_len_mm=MARK_LEN, lw=1.0):
-    """
-    功能：
-    在纸张最顶部画一条竖直短刀线（从上边缘往下伸）。
-    """
-    xpt = mm_to_pt(float(x_mm))
-    tick = mm_to_pt(float(tick_len_mm))
+def _draw_top_edge_tick(page, x_mm, tick_len_mm=MARK_LEN, lw=1.0):     # 在纸张最顶部画一条竖直短刀线（从上边缘往下伸）
+    xpt = mm_to_pt(float(x_mm))                                        # 将 x_mm 转换为 PDF 坐标系中的 pt 单位，fitz 使用的坐标系是以左上角为原点，单位为 pt（1/72 英寸），因此需要将毫米转换为 pt 来正确定位刀线位置
+    tick = mm_to_pt(float(tick_len_mm))                                # 将 tick_len_mm 转换为 pt 单位，表示刀线的长度，确保在 PDF 中正确显示
+    # 在 PDF 页面上绘制一条线段，起点是 (xpt, 0)，终点是 (xpt, tick)，颜色为黑色，线宽为 lw。这样就形成了一条从上边缘往下伸展的竖直短刀线，位置由 x_mm 决定，长度由 tick_len_mm 决定。
     page.draw_line(fitz.Point(xpt, 0), fitz.Point(xpt, tick), color=(0, 0, 0), width=lw)
 
+def parse_A_B_N_from_filename(pdf_path):                               # 从文件名中解析尺寸 A×B 和数量 N
+    base = os.path.splitext(os.path.basename(pdf_path))[0]             # 获取文件名（不带路径和扩展名），例如 "图纸_A×B^N"，用于后续解析
+    parts = base.split("^")                                            # 将文件名按 "^" 分割成多个部分，得到一个列表，例如 ["图纸_A×B", "N"]，用于后续查找尺寸和数量信息
 
-def _snap_edge_mm(v, lo, hi, eps):
-    """
-    功能：
-    数值吸边工具。
-    若 v 离 lo 或 hi 足够近，则直接吸附到边界。
-    当前版本未直接使用，保留便于后续刀线吸边扩展。
-    """
-    if abs(v - lo) <= eps:
-        return lo
-    if abs(v - hi) <= eps:
-        return hi
-    return v
-
-
-# =========================
-# 文件名解析 A*B^N
-# =========================
-def parse_A_B_N_from_filename(pdf_path):
-    """
-    功能：
-    从文件名中解析尺寸 A×B 和数量 N。
-    规则优先读取 ^ 分段中的第 7、8 段；若没有，则尝试全文搜索。
-    """
-    base = os.path.splitext(os.path.basename(pdf_path))[0]
-    parts = base.split("^")
-
-    size_part = None
-    n_part = None
-
+    size_part = None                                                   # 初始化 size_part 和 n_part 变量，用于存储解析到的尺寸和数量信息
+    n_part = None                                                      # 如果文件名格式规范，且分割后至少有 8 个部分，则直接使用第 7 和第 8 部分作为尺寸和数量信息，避免复杂的正则匹配，提高解析效率
+    # 如果文件名格式不规范，或者分割后部分不足，则使用正则表达式在所有部分中查找符合 A×B 格式的尺寸信息和数字格式的数量信息，确保能够解析出正确的尺寸和数量
     if len(parts) >= 8:
         size_part = parts[6]
         n_part = parts[7]
@@ -325,157 +174,118 @@ def parse_A_B_N_from_filename(pdf_path):
                 break
         if size_part is None or n_part is None:
             raise ValueError("无法从文件名解析 A×B 与 N：%s" % base)
-
+    # 使用正则表达式从 size_part 中提取 A 和 B 的数值，要求格式为 A×B，其中 A 和 B 可以是整数或小数，且可以有任意数量的空格和不同的乘号符号（*、x、X、×、✕）。如果不符合格式，则抛出异常提示文件名格式错误。
     m = re.search(r"(\d+(\.\d+)?)\s*[\*xX×✕]\s*(\d+(\.\d+)?)", str(size_part))
     if not m:
-        raise ValueError("尺寸段不是 A×B 格式：%s" % str(size_part))
+        raise ValueError("尺寸段不是AxB格式：%s" % str(size_part))
 
-    A = float(m.group(1))
-    B = float(m.group(3))
+    A = float(m.group(1))                                              # 从正则表达式的匹配结果中提取 A 和 B 的数值，转换为浮点数类型，便于后续计算和比较
+    B = float(m.group(3))                                              # A 对应正则表达式中的第一个捕获组，B 对应第三个捕获组，中间的乘号和空格不包含在捕获组中，因此不会影响数值的提取
 
-    m2 = re.search(r"(\d+)", str(n_part))
+    m2 = re.search(r"(\d+)", str(n_part))                              # 使用正则表达式从 n_part 中提取数量 N 的数值，要求格式为纯数字，如果不符合格式，则抛出异常提示文件名格式错误
     if not m2:
         raise ValueError("数量段不是数字：%s" % str(n_part))
     N = int(m2.group(1))
 
-    if A <= 0 or B <= 0 or N <= 0:
+    if A <= 0 or B <= 0 or N <= 0:                                     # 对解析到的 A、B、N 进行基本的合理性检查，要求它们都必须是正数，如果不满足条件，则抛出异常提示解析结果非法，帮助用户检查文件名格式是否正确
         raise ValueError("解析到的 A/B/N 非法：A=%s B=%s N=%s (%s)" % (A, B, N, base))
 
     return A, B, N
 
-
-def extract_label_text(pdf_path):
-    """
-    功能：
-    从文件名中提取左上角标签文字。
-    默认使用前两段 ^ 字段拼接；没有则退化成文件名前 40 个字符。
-    """
+def extract_label_text(pdf_path):                                      # 从文件名中提取标签文字，优先使用前两段拼接，避免过长的标签影响显示；如果没有足够的段，则退化为前 40 个字符，确保标签不会过长。
     base = os.path.splitext(os.path.basename(pdf_path))[0]
     ps = base.split("^")
     if len(ps) >= 2:
         return "^".join(ps[:2])
     return base[:40]
 
+def extract_qr_text_from_filename(pdf_path):                           # 从文件名中提取二维码文本，优先使用第 10 段（如果存在且非空），其次尝试匹配 SJ 开头的模式，最后退化为前两段拼接或前 80 个字符，确保二维码文本具有一定的唯一性和识别性。
+    base = os.path.splitext(os.path.basename(pdf_path))[0]             # 获取文件名（不带路径和扩展名），例如 "图纸_A×B^N^QR"，用于后续解析
+    ps = base.split("^")                                               # 将文件名按 "^" 分割成多个部分，得到一个列表，例如 ["图纸_A×B", "N", "QR"]，用于后续查找二维码文本信息
+    if len(ps) >= 10 and ps[9]:                                        # 如果分割后至少有 10 个部分，且第 10 个部分非空，则直接使用第 10 个部分作为二维码文本，避免复杂的正则匹配，提高解析效率
+        return str(ps[9]).strip()                                      # 返回第 10 个部分的字符串形式，并去除首尾空白，作为二维码文本
 
-def extract_qr_text_from_filename(pdf_path):
-    """
-    功能：
-    从文件名中提取二维码内容。
-    优先使用第 10 段；其次匹配 SJxxxx；最后退化为前两段拼接。
-    """
-    base = os.path.splitext(os.path.basename(pdf_path))[0]
-    ps = base.split("^")
-    if len(ps) >= 10 and ps[9]:
-        return str(ps[9]).strip()
-
-    m = re.search(r"(SJ[0-9A-Za-z]+)", base)
-    if m:
+    m = re.search(r"(SJ[0-9A-Za-z]+)", base)                           # 如果没有直接指定二维码文本，则使用正则表达式在整个文件名中查找符合 SJ 开头的模式，要求后面跟随至少一个数字或字母，如果找到则使用该匹配结果作为二维码文本，确保二维码具有一定的唯一性和识别性
+    if m:                                                              # 如果正则表达式匹配成功，返回第一个捕获组的内容，即 SJ 开头的字符串，作为二维码文本
         return m.group(1)
 
-    if len(ps) >= 2:
+    if len(ps) >= 2:                                                   # 如果没有找到 SJ 模式，则退化为使用前两段拼接的方式来生成二维码文本，确保二维码文本不会过长且具有一定的识别性；如果前两段不足，则退化为使用前 80 个字符，避免二维码文本过长导致扫描困难。
         return "^".join(ps[:2])
 
     return base[:80]
 
-
-def make_qr_png_bytes(qr_text, box_px=240):
-    """
-    功能：
-    生成二维码 PNG 二进制数据。
-    - 若 qrcode 可用，则真实生成二维码
-    - 若不可用，则生成一个带“QR”字样的占位图
-    """
-    if QR_OK:
+def make_qr_png_bytes(qr_text, box_px=240):                            # 生成二维码的 PNG 图片字节，使用 qrcode 库生成二维码图像，并将其调整为指定的像素大小；如果 qrcode 库不可用，则生成一个占位图像，显示 "QR" 字样，确保函数始终返回一个有效的 PNG 图片字节。
+    if QR_OK:                                                          # 如果 qrcode 库可用，使用 qrcode 库生成二维码图像。首先创建一个 QRCode 对象，设置版本为 None（自动调整大小），错误纠正级别为 M，盒子大小为 8 像素，边距为 0。然后将 qr_text 添加到 QRCode 对象中，并调用 make(fit=True) 来生成二维码图像。接着将二维码图像转换为 RGB 模式，并调整大小为 box_px × box_px 像素。最后将图像保存到一个 BytesIO 对象中，以 PNG 格式保存，并返回 PNG 图片的字节内容。
         qr = qrcode.QRCode(
             version=None,
             error_correction=qrcode.constants.ERROR_CORRECT_M,
             box_size=8,
             border=0
         )
-        qr.add_data(qr_text)
-        qr.make(fit=True)
+        qr.add_data(qr_text)                                           # 将 qr_text 添加到 QRCode 对象中，准备生成二维码图像
+        qr.make(fit=True)                                              # 调用 make(fit=True) 来生成二维码图像，fit=True 表示自动调整二维码的版本和大小以适应输入的数据，确保二维码能够正确编码 qr_text
+        # 将生成的二维码图像转换为 RGB 模式，并调整大小为 box_px × box_px 像素，以满足输出要求。然后将图像保存到一个 BytesIO 对象中，以 PNG 格式保存，并返回 PNG 图片的字节内容，确保函数输出一个有效的二维码图片字节。
         img = qr.make_image(fill_color="black", back_color="white").convert("RGB")
-        img = img.resize((box_px, box_px))
-        bio = BytesIO()
-        img.save(bio, format="PNG", optimize=True)
-        return bio.getvalue()
+        img = img.resize((box_px, box_px))                             # 调整二维码图像的大小为 box_px × box_px 像素，确保输出的二维码图片符合指定的尺寸要求
+        bio = BytesIO()                                                # 创建一个 BytesIO 对象，用于在内存中保存 PNG 图片数据，避免使用临时文件，确保函数的效率和简洁性
+        img.save(bio, format="PNG", optimize=True)                     # 将调整大小后的二维码图像保存到 BytesIO 对象中，以 PNG 格式保存，并启用 optimize 选项来优化 PNG 图片的大小，确保输出的二维码图片既符合尺寸要求又尽可能小
+        return bio.getvalue()                                          # 返回 PNG 图片的字节内容，供后续使用，例如嵌入到 PDF 中，确保函数输出一个有效的二维码图片字节
 
-    img = Image.new("RGB", (box_px, box_px), (255, 255, 255))
-    if PIL_DRAW_OK:
+    img = Image.new("RGB", (box_px, box_px), (255, 255, 255))          # 如果 qrcode 库不可用，创建一个新的 RGB 图像，大小为 box_px × box_px 像素，背景颜色为白色，作为占位图像，确保函数始终返回一个有效的 PNG 图片字节
+    if PIL_DRAW_OK:                                                    # 如果 PIL 的 ImageDraw 模块可用，在占位图像上绘制一个黑色的矩形边框，并在中心位置绘制 "QR" 字样，提示这是一个二维码占位图像，确保占位图像具有一定的识别性和提示作用；如果 ImageDraw 模块不可用，则保持纯白色背景的占位图像。
         d = ImageDraw.Draw(img)
         d.rectangle([0, 0, box_px - 1, box_px - 1], outline=(0, 0, 0), width=3)
         d.text((box_px * 0.28, box_px * 0.40), "QR", fill=(0, 0, 0))
-    bio = BytesIO()
-    img.save(bio, format="PNG", optimize=True)
-    return bio.getvalue()
+    bio = BytesIO()                                                    # 将占位图像保存到一个 BytesIO 对象中，以 PNG 格式保存，并启用 optimize 选项来优化 PNG 图片的大小，确保输出的占位图像既具有提示作用又尽可能小
+    img.save(bio, format="PNG", optimize=True)                         # 将占位图像保存到 BytesIO 对象中，以 PNG 格式保存，并启用 optimize 选项来优化 PNG 图片的大小，确保输出的占位图像既具有提示作用又尽可能小
+    return bio.getvalue()                                              # 返回 PNG 图片的字节内容，供后续使用，例如嵌入到 PDF 中，确保函数输出一个有效的占位图像字节
 
-
-def pick_cjk_fontfile():
-    """
-    功能：
-    在 Windows 常见中文字体中选择一个可用字体文件，用于绘制中文标签。
-    """
+def pick_cjk_fontfile(): # 选择一个可用的 CJK 字体文件，用于在 PDF 上绘制标签文字。函数会尝试几个常见的字体路径，返回第一个存在的路径；如果没有找到任何可用的字体，则返回 None，调用方需要做好兼容处理，例如使用默认字体。
     candidates = [
         r"C:\Windows\Fonts\msyh.ttc",
         r"C:\Windows\Fonts\msyh.ttf",
         r"C:\Windows\Fonts\simsun.ttc",
         r"C:\Windows\Fonts\simhei.ttf",
     ]
-    for p in candidates:
+    for p in candidates: # 遍历候选字体路径列表，检查每个路径是否存在，如果存在则返回该路径，确保函数能够找到一个可用的 CJK 字体文件；如果没有找到任何存在的路径，则返回 None，调用方需要做好兼容处理，例如使用默认字体。
         if os.path.exists(p):
             return p
     return None
-
-
-def trim_text_to_width(text, fontsize, max_width_pt):
-    """
-    功能：
-    按估算宽度截断标签文字，避免超出块宽。
-    超出时尾部加 ...
-    """
-    est = 0.55 * fontsize * len(text)
-    if est <= max_width_pt:
+# 根据字体大小和最大宽度，估算文本的宽度，并在必要时进行截断，确保绘制在 PDF 上的标签文字不会超出指定的最大宽度。
+# 函数会根据一个经验公式来估算文本的宽度，如果估算值超过最大宽度，则计算需要保留多少字符，并在末尾添加省略号 "..." 来表示被截断的部分；
+# 如果估算值不超过最大宽度，则直接返回原文本。
+def trim_text_to_width(text, fontsize, max_width_pt):                  
+    est = 0.55 * fontsize * len(text)                                  # 使用一个经验公式来估算文本的宽度，假设每个字符的平均宽度约为 0.55 倍的字体大小（单位 pt），然后乘以文本的字符数，得到文本的总宽度估算值（单位 pt）。这个公式是一个近似值，实际宽度可能会有所偏差，但对于大多数常见字体和文本长度来说是一个合理的估算。
+    if est <= max_width_pt:                                            # 如果估算的文本宽度不超过最大宽度，则直接返回原文本，无需截断，确保标签文字能够完整显示在 PDF 上。
         return text
-    keep = max(0, int(max_width_pt / (0.55 * fontsize)) - 3)
-    if keep <= 0:
+    keep = max(0, int(max_width_pt / (0.55 * fontsize)) - 3)           # 如果估算的文本宽度超过最大宽度，则需要进行截断。首先计算在保留省略号 "..." 的情况下，最多可以保留多少个字符。这个计算是通过将最大宽度除以每个字符的平均宽度（0.55 * fontsize）来得到总共可以容纳多少个字符，然后再减去 3 个字符的空间来给省略号留出位置。最后使用 max(0, ...) 来确保保留的字符数不会为负数，避免出现错误。
+    if keep <= 0:                                                      # 如果计算得到的保留字符数小于或等于 0，说明即使只保留省略号 "..." 也无法满足最大宽度的要求，此时直接返回 "..."，表示文本被完全截断，确保标签文字不会超出指定的最大宽度。
         return "..."
     return text[:keep] + "..."
-
-
-def _draw_label_top_left(page, text, x_left_mm, y_top_mm, max_w_mm):
-    """
-    功能：
-    在块左上角绘制标签文字。
-    - 会自动选中文字体
-    - 会自动按最大宽度截断
-    """
-    fontfile = pick_cjk_fontfile()
-    fontsize = LABEL_FONT_SIZE
-    max_w_pt = mm_to_pt(max(5.0, float(max_w_mm)))
-    txt = trim_text_to_width(text, fontsize, max_w_pt)
-    xpt = mm_to_pt(float(x_left_mm) + 1.0)
-    ypt = mm_to_pt(float(y_top_mm) + 7.5)
-    if fontfile:
+# 在 PDF 页面上指定的位置绘制标签文字，使用 pick_cjk_fontfile() 选择一个可用的 CJK 字体文件，并使用 trim_text_to_width() 
+# 来确保文本不会超出指定的最大宽度。函数会将文本绘制在 (x_left_mm, y_top_mm) 的位置，字体大小为 LABEL_FONT_SIZE，颜色为黑色；
+# 如果没有找到可用的 CJK 字体，则使用默认字体 "helv" 来绘制文本，确保标签文字能够正确显示在 PDF 上。
+def _draw_label_top_left(page, text, x_left_mm, y_top_mm, max_w_mm):   
+    fontfile = pick_cjk_fontfile()                                     # 选择一个可用的 CJK 字体文件，如果没有找到则返回 None，调用方需要做好兼容处理，例如使用默认字体。
+    fontsize = LABEL_FONT_SIZE                                         # 设置字体大小为 LABEL_FONT_SIZE，单位为 pt，用于在 PDF 上绘制标签文字，确保标签文字具有适当的大小和可读性。
+    max_w_pt = mm_to_pt(max(5.0, float(max_w_mm)))                     # 将最大宽度 max_w_mm 转换为 PDF 坐标系中的 pt 单位，确保在 PDF 上正确限制标签文字的宽度。这里使用 max(5.0, ...) 来确保最大宽度至少为 5mm，避免过小的宽度导致标签文字无法显示。
+    txt = trim_text_to_width(text, fontsize, max_w_pt)                 # 使用 trim_text_to_width() 来确保文本不会超出指定的最大宽度，函数会根据字体大小和最大宽度来估算文本的宽度，并在必要时进行截断，添加省略号 "..." 来表示被截断的部分，确保标签文字能够正确显示在 PDF 上且不会超出边界。
+    xpt = mm_to_pt(float(x_left_mm) + 1.0)                             # 将 x_left_mm 转换为 PDF 坐标系中的 pt 单位，并在基础上加上 1.0 mm 的偏移，确保标签文字不会紧贴边缘，具有一定的内边距，提升视觉效果。
+    ypt = mm_to_pt(float(y_top_mm) + 7.5)                              # 将 y_top_mm 转换为 PDF 坐标系中的 pt 单位，并在基础上加上 7.5 mm 的偏移，确保标签文字不会紧贴边缘，具有一定的内边距，提升视觉效果。这里的 7.5 mm 是一个经验值，适用于大多数字体大小和标签位置，可以根据实际情况进行调整。
+    if fontfile:                                                       # 如果找到了可用的 CJK 字体文件，则使用该字体文件来绘制文本，确保标签文字能够正确显示在 PDF 上；如果没有找到可用的 CJK 字体文件，则使用默认字体 "helv" 来绘制文本，确保标签文字能够正确显示在 PDF 上。
         page.insert_text(fitz.Point(xpt, ypt), txt, fontsize=fontsize, fontfile=fontfile, color=(0, 0, 0))
     else:
         page.insert_text(fitz.Point(xpt, ypt), txt, fontsize=fontsize, fontname="helv", color=(0, 0, 0))
-
-
-# =========================
-# PDF结构识别 / bbox
-# =========================
+# PDF 结构信息提取，包括文本框、图像和绘图对象的边界框，用于后续只提取实际图形区域，避免把说明文字等也裁进去。
 def _is_probably_page_frame(rect_obj, page_rect):
-    """
-    功能：
-    判断一个矩形是否很可能是整页边框。
-    若是整页边框，则在后续 bbox 提取中忽略，避免把整页当成图形内容。
-    """
-    if rect_obj is None:
+    if rect_obj is None:                                               # 如果传入的矩形对象为 None，直接返回 False，表示无法判断该矩形是否可能是页面边框，确保函数的健壮性。
         return False
     tol = 2.0
-    if rect_obj.width <= 0 or rect_obj.height <= 0:
+    if rect_obj.width <= 0 or rect_obj.height <= 0:                    # 如果传入的矩形对象的宽度或高度小于或等于 0，直接返回 False，表示该矩形不可能是页面边框，因为页面边框应该具有正的宽度和高度，确保函数的健壮性。
         return False
+    # 判断传入的矩形对象是否在宽度和高度上都接近页面矩形的大小，使用 0.985 的比例作为一个经验阈值，确保函数能够识别出那些几乎覆盖整个页面的矩形，这些矩形很可能是页面边框。
     full_like = (rect_obj.width >= 0.985 * page_rect.width and rect_obj.height >= 0.985 * page_rect.height)
+    # 判断传入的矩形对象是否在四条边上都接近页面矩形的边界，使用一个容差值 tol 来允许一定的偏差，确保函数能够识别出那些虽然不完全覆盖整个页面但在边界上非常接近的矩形，这些矩形也很可能是页面边框。 
     touches_all_edges = (
         abs(rect_obj.x0 - page_rect.x0) <= tol and
         abs(rect_obj.y0 - page_rect.y0) <= tol and
@@ -483,18 +293,11 @@ def _is_probably_page_frame(rect_obj, page_rect):
         abs(rect_obj.y1 - page_rect.y1) <= tol
     )
     return full_like and touches_all_edges
-
-
+# 从 PDF 页面中提取结构信息，包括页面矩形、文本框、图像边界框和绘图对象边界框。函数会加载指定页码的页面，获取页面矩形，
+# 并遍历页面上的文本块和图像块来提取它们的边界框，同时过滤掉那些可能是页面边框的矩形。对于绘图对象，也会提取它们的边界
+# 框，并过滤掉可能是页面边框的矩形。最后返回一个包含页面矩形、文本框列表、图像边界框和绘图对象边界框的字典，供后续使用，
+# 例如在渲染图像时遮盖文本区域，或者在检测图形时只关注实际的图像区域。
 def get_page_struct_info(doc, page_index):
-    """
-    功能：
-    读取 PDF 页面结构信息：
-    - 文本框列表
-    - 图像 bbox
-    - 绘图对象 bbox
-
-    用于后续只提取“实际图形区域”，避免把说明文字等也裁进去。
-    """
     page = doc.load_page(page_index)
     page_rect = page.rect
 
@@ -541,13 +344,9 @@ def get_page_struct_info(doc, page_index):
         "image_bbox": rect_union(image_boxes),
         "draw_bbox": rect_union(draw_rects),
     }
-
-
+# 将 PDF 页面渲染为 PIL 图像，使用 fitz 库加载 PDF 并渲染指定页码的页面为图像。函数会根据指定的 DPI 来计算缩放比例，
+# 并将渲染结果转换为 PIL 图像返回。
 def render_page_to_pil(pdf_path, page_index=0, dpi=RENDER_DPI, doc=None):
-    """
-    功能：
-    将 PDF 的某一页渲染成 PIL 图片。
-    """
     close_doc = False
     if doc is None:
         doc = fitz.open(pdf_path)
@@ -562,13 +361,9 @@ def render_page_to_pil(pdf_path, page_index=0, dpi=RENDER_DPI, doc=None):
     finally:
         if close_doc:
             doc.close()
-
-
+# 将 PDF 坐标系中的矩形边界框转换为像素坐标系中的边界框，函数会根据页面矩形和图像的宽高来计算缩放比例，
+# 并将 PDF 坐标系中的矩形边界框转换为像素坐标系中的边界框，确保在图像上正确定位 PDF 中的文本或图像区域。
 def pdf_rect_to_px_bbox(rect_pt, page_rect_pt, img_w, img_h):
-    """
-    功能：
-    将 PDF 坐标系中的 fitz.Rect 转成像素 bbox。
-    """
     if rect_pt is None:
         return None
     if page_rect_pt.width <= 0 or page_rect_pt.height <= 0:
@@ -581,14 +376,9 @@ def pdf_rect_to_px_bbox(rect_pt, page_rect_pt, img_w, img_h):
     x1 = (rect_pt.x1 - page_rect_pt.x0) * sx
     y1 = (rect_pt.y1 - page_rect_pt.y0) * sy
     return clamp_bbox(x0, y0, x1, y1, img_w, img_h)
-
-
+# 在 PIL 图像上遮盖 PDF 中的文本区域，函数会根据 PDF 坐标系中的文本框列表和页面矩形来计算文本区域在图像上的位置，
+# 并使用白色矩形遮盖这些区域，确保在后续的图像处理或图形检测中不会受到文本区域的干扰。
 def mask_text_regions_on_pil(pil_img, text_boxes_pt, page_rect_pt, pad_mm=TEXT_MASK_PAD_MM):
-    """
-    功能：
-    将 PDF 页面中的文本区域在渲染图里涂白。
-    目的：后续做图形 bbox 检测时，尽量只识别图形，不识别文字说明。
-    """
     if not text_boxes_pt:
         return pil_img
     arr = np.array(pil_img.convert("RGB")).copy()
@@ -611,14 +401,9 @@ def mask_text_regions_on_pil(pil_img, text_boxes_pt, page_rect_pt, pad_mm=TEXT_M
         y1 = max(y0 + 1, min(H, y1))
         arr[y0:y1, x0:x1, :] = 255
     return Image.fromarray(arr)
-
-
+# 从二值化的掩码图像中提取边界框，函数会根据掩码中非零像素的位置来计算边界框的坐标，并进行一些基本的过滤，
+# 例如过滤掉过小的区域或过大的区域，确保提取到的边界框具有一定的合理性和代表性。
 def _bbox_from_mask(mask, W, H):
-    """
-    功能：
-    从二值 mask 中提取整体 bbox。
-    若非白色像素太少或框太小，则返回 None。
-    """
     ys, xs = np.where(mask > 0)
     if xs.size < 60 or ys.size < 60:
         return None
@@ -629,24 +414,17 @@ def _bbox_from_mask(mask, W, H):
     if (x1 - x0) >= 0.995 * W and (y1 - y0) >= 0.995 * H:
         return None
     return (x0, y0, x1, y1)
-
-
+# 判断一个边界框是否可能是页面边框，函数会检查边界框是否接近页面的四条边，并且是否在宽度和高度上都接近页面的大小，
+# 确保能够识别出那些几乎覆盖整个页面或者在边界上非常接近的矩形，这些矩形很可能是页面边框。
 def _reject_border_bbox(x, y, w, h, W, H):
-    """
-    功能：
-    过滤掉疑似“整页边框”的轮廓 bbox。
-    """
     edge_pad = 8
     touches_edge = (x <= edge_pad or y <= edge_pad or (x + w) >= (W - edge_pad) or (y + h) >= (H - edge_pad))
     huge = (w >= 0.985 * W and h >= 0.985 * H)
     return touches_edge and huge
-
-
+# 从二值化的掩码图像中提取边界框，函数会使用 OpenCV 的 findContours 方法来找到掩码中的轮廓，并根据轮廓计算边界框。
+# 函数还会进行一些过滤，例如过滤掉过小的区域或过大的区域，以及可能是页面边框的区域,确保提取到的边界框具有一定的合理
+# 性和代表性。最后函数会根据面积来选择合适的边界框，或者将多个边界框进行合并，返回一个最终的边界框。
 def _bbox_from_contours_union(mask, W, H):
-    """
-    功能：
-    对轮廓检测结果做合并，得到主要图形区域的整体 bbox。
-    """
     contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
     if not contours:
         return None
@@ -680,15 +458,10 @@ def _bbox_from_contours_union(mask, W, H):
     x1 = max(k[2] for k in keep)
     y1 = max(k[3] for k in keep)
     return (int(x0), int(y0), int(x1), int(y1))
-
-
+# 从 PIL 图像中找到可能的外部边界框，函数会将图像转换为灰度图，并使用不同的阈值和方法来二值化图像，提取可能的边界框。
+# 函数会尝试多种方法来提取边界框，例如自适应阈值、Otsu 阈值和 Canny 边缘检测，并将提取到的边界框进行过滤和比较，最终
+# 返回一个最合适的边界框，确保能够找到图像中实际的图形区域，而不是被文本或其他元素干扰。
 def find_outer_bbox(pil_img):
-    """
-    功能：
-    在渲染图中自动寻找图形外接框。
-    - 若有 cv2，则综合多种阈值和边缘方法找 bbox
-    - 若没有 cv2，则用灰度阈值兜底
-    """
     arr = np.array(pil_img.convert("RGB"))
     H, W = arr.shape[0], arr.shape[1]
 
@@ -752,18 +525,10 @@ def find_outer_bbox(pil_img):
             best = (x0, y0, x1, y1)
 
     return best if best else candidates[0]
-
-
+# 获取 PDF 页面中可能的边界框候选区域，函数会调用 get_page_struct_info() 来提取页面的结构信息，包括文本框、图像边界框和绘图对象边界框。
+# 然后函数会将这些边界框从 PDF 坐标系转换为像素坐标系，并使用 mask_text_regions_on_pil() 来遮盖文本区域，最后调用 find_outer_bbox() 
+# 来找到可能的图形区域边界框，确保能够获取到 PDF 页面中实际的图形区域边界框候选，以供后续使用，例如在裁切图像时参考这些边界框来确定裁切范围。
 def get_page_bbox_candidates_px(doc, page_index, pil_img):
-    """
-    功能：
-    综合三类候选 bbox：
-    - 绘图对象 bbox
-    - 图像对象 bbox
-    - 图像分析 bbox
-
-    返回像素坐标下的三个候选框，供后续融合。
-    """
     info = get_page_struct_info(doc, page_index)
     page_rect = info["page_rect"]
     text_boxes = info["text_boxes"]
@@ -776,26 +541,17 @@ def get_page_bbox_candidates_px(doc, page_index, pil_img):
     cv_bbox_px = find_outer_bbox(masked)
 
     return draw_bbox_px, image_bbox_px, cv_bbox_px
-
-
+# 将边界框扩展一定的像素值，并确保扩展后的边界框仍然在图像范围内，函数会根据指定的扩展像素值来调整边界框的坐标，
+# 并使用 clamp_bbox() 来确保扩展后的边界框不会超出图像的宽度和高度，确保在裁切图像时能够正确地扩展边界框，同时
+# 避免超出图像范围导致错误。
 def _expand_bbox_clamped(bbox, exp_px, img_w, img_h):
-    """
-    功能：
-    在 bbox 四周做扩张，并保证扩张后仍不越界。
-    """
     x0, y0, x1, y1 = bbox
     return clamp_bbox(x0 - exp_px, y0 - exp_px, x1 + exp_px, y1 + exp_px, img_w, img_h)
-
-
+# 根据参考边界框和 PDF 页面中的边界框候选区域来确定最终的裁切边界框，并将 PDF 页面渲染为 PIL 图像，最后裁切图
+# 像并保存为 PNG 格式的字节内容返回，函数会根据参考边界框和 PDF 页面中的边界框候选区域来计算一个联合的边界框，
+# 并在此基础上进行一定的扩展，确保裁切后的图像能够包含所有的图形内容，同时避免过多的空白区域。最后将裁切后的图
+# 像保存为 PNG 格式的字节内容返回，供后续使用，例如嵌入到 PDF 中。
 def make_part_png_bytes_using_ref_bbox(pdf_path, page_index, ref_bbox, ref_size, dpi=RENDER_DPI, doc=None):
-    """
-    功能：
-    根据参考 bbox 裁切 PDF 页面，生成单个图块的 PNG 二进制数据。
-
-    用法：
-    - 图形页使用轮廓页 bbox 做参考
-    - 轮廓页使用自身轮廓 bbox 做参考
-    """
     pad_px = mm_to_px(CROP_PAD_MM, dpi)
 
     img = render_page_to_pil(pdf_path, page_index=page_index, dpi=dpi, doc=doc)
@@ -839,21 +595,9 @@ def make_part_png_bytes_using_ref_bbox(pdf_path, page_index, ref_bbox, ref_size,
     bio = BytesIO()
     img.crop((x0, y0, x1, y1)).convert("RGBA").save(bio, format="PNG", optimize=True)
     return bio.getvalue()
-
-
-# =========================================================
-# 混拼方向选择
-# =========================================================
-def _mix_choose_orient(w0, h0):
-    """
-    功能：
-    为单个图块选择朝向（是否旋转 90°）。
-
-    规则：
-    1. 若存在 width <= 315 的朝向，优先选高度更大的那个
-    2. 若两个朝向都 >315，则选宽度更小的那个
-    返回：(宽, 高, 是否旋转90度)
-    """
+# 在给定宽度 w0 和高度 h0 的情况下，判断是否需要旋转图块以适应页面的宽度限制。函数会比较原始宽高和旋转后的宽高，
+# 并根据是否满足页面宽度限制以及高度的比较来选择最佳的排布方式，确保在混拼布局时能够更紧凑地利用页面空间。
+def _mix_choose_orient(w0, h0):                    
     w0 = float(w0)
     h0 = float(h0)
 
@@ -871,24 +615,9 @@ def _mix_choose_orient(w0, h0):
         return (w_b, h_b, r_b)
 
     return (w_a, h_a, r_a) if w_a <= w_b else (w_b, h_b, r_b)
-
-
-# =========================================================
-# 混拼主算法
-# =========================================================
+# 每行选一个 base_h行基准高度),同一类型可在该行做列×堆叠布局,通过行评分选择更紧凑的排法,高度跨过464mm时自动插入10mm缝,
+# 最后再做一次hole fill,用剩余小图补空洞
 def pack_mix_by_height_rule(mix_types, page_max_h=PAGE_H_MAX):
-    """
-    功能：
-    混拼主布局算法。
-    将若干 N<10 的图块类型混合排到若干张纸上。
-
-    核心逻辑：
-    - 每行选一个 base_h（行基准高度）
-    - 同一类型可在该行做列×堆叠布局
-    - 通过行评分选择更紧凑的排法
-    - 高度跨过 464mm 时自动插入 10mm 缝
-    - 最后再做一次 hole fill，用剩余小图补空洞
-    """
     X_START = float(PAGE_MARGIN_L)
     X_END = float(PAGE_W - PAGE_MARGIN_R)
     X_SPLIT = float(SPLIT_X)
@@ -906,17 +635,10 @@ def pack_mix_by_height_rule(mix_types, page_max_h=PAGE_H_MAX):
             print("⚠️ MIX_SKIP_TOO_WIDE_FOR_PAGE:", t.get("tid"), "W=%.2f > %.2f" % (float(t["W"]), TOTAL_USABLE_W))
             t["rem"] = 0
 
+# 根据 mix_types 中的每个类型的高度来确定行基准高度，并在每行中尝试放置尽可能多的图块，直到达到页面的最大高度限制。
+# 函数会根据行基准高度来选择适合的图块进行排布,并在每行结束后更新剩余的图块数量，最后返回一个包含每行布局信息的列表，
+# 供后续使用，例如在生成 PDF 时参考这些布局信息来放置图块。
     def _build_one_row(work_list, base_h, y):
-        """
-        功能：
-        在给定 base_h 和当前 y 位置下，构造一整行布局。
-
-        返回：
-        - row_blocks：该行中每个“大块”的整体外接区域（供标签/二维码/刀线使用）
-        - row_added：该行实际放入的所有 placement（每张小图）
-        - row_used_h：该行实际占用高度
-        - row_max_end：该行最底部 y
-        """
         x = X_START
         in_left = True
         row_blocks = []
@@ -1164,30 +886,12 @@ def pack_mix_by_height_rule(mix_types, page_max_h=PAGE_H_MAX):
 
     return pages
 
-
 class _MaxRectsBinSimple(object):
-    """
-    功能：
-    一个极简版的 MaxRects 空洞填充器。
-    用于把剩余小图塞进已有大布局留下的空洞里。
-    """
-
     def __init__(self, W, H):
-        """
-        功能：
-        初始化一个宽 W、高 H 的空闲矩形区域。
-        """
         self.W = int(W)
         self.H = int(H)
         self.free = [(0, 0, self.W, self.H)]
-
     def _prune(self, rects):
-        """
-        功能：
-        清理空闲矩形列表：
-        - 去掉非法矩形
-        - 去掉被完全包含的矩形
-        """
         cleaned = []
         for (x, y, w, h) in rects:
             x = int(x)
@@ -1220,10 +924,6 @@ class _MaxRectsBinSimple(object):
         return out
 
     def cut_out(self, ox, oy, ow, oh):
-        """
-        功能：
-        从当前空闲区域中挖掉一个已占用矩形。
-        """
         ox = int(ox)
         oy = int(oy)
         ow = int(ow)
@@ -1250,10 +950,6 @@ class _MaxRectsBinSimple(object):
         self.free = self._prune(new_free)
 
     def find_bottom_left(self, rw, rh):
-        """
-        功能：
-        用 Bottom-Left 策略，在当前空闲区域中查找一个可放置 rw×rh 的位置。
-        """
         rw = int(rw)
         rh = int(rh)
         best = None
@@ -1266,13 +962,7 @@ class _MaxRectsBinSimple(object):
             return None
         return {"x": best[2], "y": best[3]}
 
-
 def _mix_hole_fill(page, types_list, page_max_h, gap):
-    """
-    功能：
-    对已生成的混拼页做“补洞”。
-    使用剩余未放完的小图，尽量填充空白区域，提高利用率。
-    """
     H = float(page.get("used_h", 0.0))
     if H <= 1e-6:
         return
@@ -1367,27 +1057,7 @@ def _mix_hole_fill(page, types_list, page_max_h, gap):
             max_end = max(max_end, float(p["y"]) + float(p["h"]))
         page["used_h"] = max(page.get("used_h", 0.0), max_end)
 
-
 def _mix_draw_edge_ticks(page, items, page_h_mm):
-    """
-    功能：
-    只为混拼页面的“外侧块”画刀线。
-
-    规则：
-    1. 顶部刀线：
-       - 只取最顶部那一批块
-       - 每个顶部块画 x0 / x1 两条顶部刀线
-
-    2. 左侧刀线：
-       - 只取最左侧那一批块
-       - 左侧刀线的上边界不使用块顶 y0
-       - 而是使用 y0 + QR_BAND + 0.8
-       - 这样二维码和标签会显示在左侧刀线上方，而不是下方
-
-    兼容输入：
-    - block: {x0, x1, y0, y1}
-    - placement: {x, y, w, h}
-    """
     if not items:
         return
 
@@ -1454,18 +1124,7 @@ def _mix_draw_edge_ticks(page, items, page_h_mm):
         if 0.0 - 1e-6 <= y <= float(page_h_mm) + 1e-6:
             _draw_left_edge_tick(page, y, tick_len_mm=MARK_LEN, lw=1.0)
 
-
 def render_mix_page(page_obj, is_contour):
-    """
-    功能：
-    将一张混拼布局页渲染成 PDF。
-
-    渲染内容包括：
-    - 页面外框
-    - 每个 block 的二维码和标签
-    - 每张小图（图形页或轮廓页）
-    - 顶部/左侧刀线
-    """
     H = float(page_obj.get("used_h", 30.0)) + float(MARGIN_BOTTOM_MM) + float(SAFE_PAD_MM)
     W = float(PAGE_W)
 
@@ -1517,18 +1176,7 @@ def render_mix_page(page_obj, is_contour):
     _mix_draw_edge_ticks(page, page_obj.get("blocks", []), page_h_mm=H)
     return doc
 
-
-# =========================
-# safe_save
-# =========================
 def safe_save(doc, out_path):
-    """
-    功能：
-    安全保存 PDF。
-    - 先保存为临时文件
-    - 再原子替换正式文件
-    - 若正式文件被占用，则自动另存带时间戳版本
-    """
     ensure_dir(os.path.dirname(out_path))
     tmp_pdf = os.path.join(
         os.path.dirname(out_path),
@@ -1563,23 +1211,7 @@ def safe_save(doc, out_path):
                 pass
         return alt_pdf
 
-
-# =========================
-# 主入口
-# =========================
 def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
-    """
-    功能：
-    整个拼图流程的总入口。
-
-    主要步骤：
-    1. 收集输入 PDF
-    2. 复制归档到 test 目录
-    3. 逐个 PDF 解析尺寸/数量
-    4. 对 N<10 的项目构造 mix_types
-    5. 执行混拼布局
-    6. 分别输出图形页和轮廓页 PDF
-    """
     global DEST_DIR, IN_PDF_ARCHIVE_DIR, DEST_DIR1, DEST_DIR2
 
     if cfg:
@@ -1723,19 +1355,12 @@ def run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None):
         "skip": skip_list,
     }
 
-
 def main():
-    """
-    功能：
-    命令行直接运行时的入口。
-    调用 run() 并打印输出统计信息。
-    """
     res = run(cfg=None, input_pdfs=None, progress_cb=None, log_cb=None)
     print("DONE:")
     print("  mix_p1_files:", len(res.get("mix_p1_files") or []))
     print("  mix_p2_files:", len(res.get("mix_p2_files") or []))
     print("  skip:", len(res.get("skip") or []))
-
 
 if __name__ == "__main__":
     main()
