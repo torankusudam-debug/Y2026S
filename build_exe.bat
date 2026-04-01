@@ -14,7 +14,8 @@ REM ===============================
 set "APP_NAME=MyApp"
 set "ENTRY_PY=%ROOT%\run.py"
 set "VBS_FILE=%ROOT%\run_ai.vbs"
-set "JSX_FILE=%ROOT%\AItest_ai.jsx"
+set "JSX_FILE=%ROOT%\AItest3.jsx"
+if not exist "%JSX_FILE%" set "JSX_FILE=%ROOT%\AItest_ai.jsx"
 if not exist "%JSX_FILE%" set "JSX_FILE=%ROOT%\AItest.jsx"
 
 set "ICON_FILE=%ROOT%\resources\icon.ico"
@@ -70,6 +71,7 @@ if not exist "%VBS_FILE%" (
 if not exist "%JSX_FILE%" (
     echo [ERROR] 找不到 JSX 文件
     echo         已检查:
+    echo         %ROOT%\AItest3.jsx
     echo         %ROOT%\AItest_ai.jsx
     echo         %ROOT%\AItest.jsx
     pause
@@ -132,7 +134,7 @@ if exist "%ICON_FILE%" (
       --contents-directory "%CONTENTS_DIR%" ^
       --add-data "%VBS_FILE%;." ^
       --add-data "%JSX_FILE%;." ^
-      --hidden-import get_best ^
+      --hidden-import get_best6 ^
       --noupx ^
       --icon "%ICON_FILE%"
 ) else (
@@ -148,7 +150,7 @@ if exist "%ICON_FILE%" (
       --contents-directory "%CONTENTS_DIR%" ^
       --add-data "%VBS_FILE%;." ^
       --add-data "%JSX_FILE%;." ^
-      --hidden-import get_best ^
+      --hidden-import get_best6 ^
       --noupx
 )
 

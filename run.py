@@ -1,17 +1,17 @@
 ﻿# -*- coding: utf-8 -*-
 """
-run.py（PySide6 工程GUI版：源PDF -> AI预处理 + 子进程运行拼图算法 get_best6）
+run.py(PySide6 工程GUI版：源PDF -> AI预处理 -> 拼图算法 get_best6)
 
-按你的新要求改成：
-0) 第1个目录：选择“源PDF目录”
-1) 第2个目录：选择“AI目录”（把源PDF复制并改后缀为 .ai 到这里）
-2) 第3~5个目录功能保持不变
-3) 传入第3个目录（work目录）的文件改为：
-   “第2个AI目录里，那些经 JSX 处理成功的 AI 文件”
-4) 然后子进程运行 get_best6 进行拼图
+按当前流程：
+0) 第1个目录：选择“源文件夹”(原始 PDF)
+1) 第2个目录：选择“AI目录”(把源 PDF 复制并改后缀为 .ai 到这里，JSX 导出的 PDF 也直接输出到这里)
+2) 第3个目录：选择“源文件  (备份)”(每次运行自动创建同名时间子目录，备份与本次导出 PDF 同名的源文件)
+3) 第4~5个目录：输出目录保持不变
+4) 子进程运行 get_best6 进行拼图
 
-✅ 仅使用 PySide6（已去掉 PyQt5）
+✅ 仅使用 PySide6(已去掉 PyQt5)
 ✅ 已移除“贴二维码”相关全部代码
+✅ 已去掉“导入文件夹”步骤
 ✅ 仅调用 get_best6
 """
 
@@ -22,9 +22,8 @@ import shutil
 import traceback
 import subprocess
 import re
-from datetime import datetime
 
-# ====== 仅使用 get_best6（必须同目录）======
+# ====== 仅使用 get_best6(必须同目录)======
 import get_best6
 
 # ---- 强制本进程输出编码，避免混码导致子进程/父进程互相坑 ----
@@ -37,16 +36,30 @@ except Exception:
 OUT_NAME_P1 = "over_test_p1.pdf"
 OUT_NAME_P2 = "over_test_p2.pdf"
 
+RUN_MODE_FULL = "full"
+RUN_MODE_SEPARATE = "separate"
+RUN_MODE_ALGO = "algo"
+
+RUN_MODE_TEXT = {
+    RUN_MODE_FULL: "一气呵成",
+    RUN_MODE_SEPARATE: "仅分离",
+    RUN_MODE_ALGO: "仅拼接",
+}
+
+
+def is_frozen_app():
+    return bool(getattr(sys, "frozen", False))
+
 # -------------------------
 # Qt imports (ONLY PySide6)
 # -------------------------
-from PySide6.QtCore import Qt, QThread, Signal, Slot
+from PySide6.QtCore import Qt, QThread, Signal, Slot, QSettings
 from PySide6.QtGui import QFont, QIcon
 from PySide6.QtWidgets import (
     QApplication, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLineEdit, QPushButton, QLabel, QTextEdit, QFileDialog,
-    QMessageBox, QProgressBar, QSplitter,
-    QFrame, QDialog, QRadioButton, QButtonGroup
+    QMessageBox, QProgressBar, QSplitter, QCheckBox,
+    QFrame, QDialog
 )
 
 
@@ -56,6 +69,28 @@ from PySide6.QtWidgets import (
 def ensure_dir(path):
     if path and (not os.path.isdir(path)):
         os.makedirs(path)
+
+
+def build_time_batch_name():
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def make_unique_batch_name(base_dirs, base_name=None):
+    seed = (base_name or build_time_batch_name()).strip() or build_time_batch_name()
+    candidate = seed
+    idx = 1
+    while True:
+        conflict = False
+        for root_dir in (base_dirs or []):
+            if not root_dir:
+                continue
+            if os.path.exists(os.path.join(root_dir, candidate)):
+                conflict = True
+                break
+        if not conflict:
+            return candidate
+        candidate = "%s_%02d" % (seed, idx)
+        idx += 1
 
 
 def norm_path(p):
@@ -70,7 +105,7 @@ def is_output_like_pdf(filename_lower):
 
 
 def iter_input_pdf_files(folder, recursive=True):
-    """遍历源PDF（排除 over_test*.pdf）"""
+    """遍历源PDF(排除 over_test*.pdf)"""
     if not os.path.isdir(folder):
         return
 
@@ -98,7 +133,7 @@ def iter_input_pdf_files(folder, recursive=True):
 
 
 def list_ai_files(folder):
-    """列出 folder 下的 .ai（递归）"""
+    """列出 folder 下的 .ai(递归)"""
     if not os.path.isdir(folder):
         return []
     out = []
@@ -135,6 +170,32 @@ def snapshot_pdf_mtimes(folder):
             out[norm_path(p)] = (p, os.path.getmtime(p), os.path.getsize(p))
         except Exception:
             pass
+    return out
+
+
+def snapshot_pdf_mtimes_multi(folders):
+    out = {}
+    seen = set()
+    for folder in folders or []:
+        if not folder:
+            continue
+        nk = norm_path(folder)
+        if nk in seen:
+            continue
+        seen.add(nk)
+        out.update(snapshot_pdf_mtimes(folder))
+    return out
+
+
+def basename_no_ext(path):
+    return os.path.splitext(os.path.basename(path))[0]
+
+
+def build_pdf_basename_map(folder, recursive=True):
+    out = {}
+    for pdf_path in iter_input_pdf_files(folder, recursive=recursive):
+        k = basename_no_ext(pdf_path).lower()
+        out.setdefault(k, []).append(pdf_path)
     return out
 
 
@@ -191,25 +252,25 @@ def apply_paths_to_module(mod, dest_dir, archive_dir, out_dir1, out_dir2):
 
 
 # -------------------------
-# ✅ 源PDF -> AI目录（复制文件并改后缀）
+# ✅ 源PDF -> AI目录(复制文件并改后缀)
 # -------------------------
 def copy_pdf_to_ai_dir(src_pdf_dir, ai_dir, recursive=True, overwrite=False, log_cb=None, stop_flag=None):
     """
     把 src_pdf_dir 里的 PDF 复制到 ai_dir，并改后缀为 .ai
     注意：
     - 不是格式转换，只是复制文件内容并改扩展名
-    - 保留源PDF目录不变
+    - 保留源文件夹不变
     - 尽量保持相对目录结构
     """
     if not os.path.isdir(src_pdf_dir):
         if log_cb:
-            log_cb("[FATAL] 源PDF目录不存在: %s\n" % src_pdf_dir)
-        return {"ok": 0, "skip": 0, "err": 1, "pairs": []}
+            log_cb("[FATAL] 源文件夹不存在: %s\n" % src_pdf_dir)
+        return {"ok": 0, "skip": 0, "reuse": 0, "err": 1, "pairs": []}
 
     ensure_dir(ai_dir)
 
     cnt_ok = 0
-    cnt_skip = 0
+    cnt_reuse = 0
     cnt_err = 0
     pairs = []
 
@@ -231,8 +292,8 @@ def copy_pdf_to_ai_dir(src_pdf_dir, ai_dir, recursive=True, overwrite=False, log
                     os.remove(ai_path)
                 else:
                     if log_cb:
-                        log_cb("[SKIP exists] %s\n" % ai_path)
-                    cnt_skip += 1
+                        log_cb("[REUSE exists] %s\n" % ai_path)
+                    cnt_reuse += 1
                     pairs.append({
                         "src_pdf": pdf_path,
                         "ai_path": ai_path
@@ -254,11 +315,12 @@ def copy_pdf_to_ai_dir(src_pdf_dir, ai_dir, recursive=True, overwrite=False, log
             cnt_err += 1
 
     if log_cb:
-        log_cb("[DONE copy pdf->ai] OK=%d SKIP=%d ERR=%d\n" % (cnt_ok, cnt_skip, cnt_err))
+        log_cb("[DONE copy pdf->ai] OK=%d REUSE=%d ERR=%d\n" % (cnt_ok, cnt_reuse, cnt_err))
 
     return {
         "ok": cnt_ok,
-        "skip": cnt_skip,
+        "skip": cnt_reuse,
+        "reuse": cnt_reuse,
         "err": cnt_err,
         "pairs": pairs
     }
@@ -270,7 +332,7 @@ def copy_pdf_to_ai_dir(src_pdf_dir, ai_dir, recursive=True, overwrite=False, log
 def run_jsx_batch(ai_files, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_flag=None, proc_setter=None):
     """
     对给定 ai_files 中每个 .ai 执行：
-      cscript //nologo run_ai.vbs AItest_ai.jsx "2;AI全路径;输出目录"
+      cscript //nologo run_ai.vbs AItest3.jsx "2;AI全路径;输出目录"
 
     返回：
     {
@@ -313,8 +375,19 @@ def run_jsx_batch(ai_files, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_f
         if stop_flag and stop_flag():
             break
 
-        before_pdf = snapshot_pdf_mtimes(out_dir)
-        data = "%s;%s;%s" % (str(cx), ai_path, out_dir)
+        ai_parent_dir = os.path.dirname(os.path.abspath(ai_path))
+        target_out_dir = os.path.abspath(out_dir) if out_dir else ai_parent_dir
+
+        probe_dirs = []
+        for probe_dir in (target_out_dir, ai_parent_dir):
+            if not probe_dir:
+                continue
+            if norm_path(probe_dir) in {norm_path(p) for p in probe_dirs}:
+                continue
+            probe_dirs.append(probe_dir)
+
+        before_pdf = snapshot_pdf_mtimes_multi(probe_dirs)
+        data = "%s;%s;%s" % (str(cx), ai_path, target_out_dir)
         cmd = ["cscript", "//nologo", vbs_path, jsx_path, data]
 
         if log_cb:
@@ -400,7 +473,7 @@ def run_jsx_batch(ai_files, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_f
         ok_count += 1
         ok_ai.append(ai_path)
 
-        after_pdf = snapshot_pdf_mtimes(out_dir)
+        after_pdf = snapshot_pdf_mtimes_multi(probe_dirs)
         produced_pdf = []
         for nk, info in after_pdf.items():
             p_after, mt_after, sz_after = info
@@ -411,9 +484,11 @@ def run_jsx_batch(ai_files, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_f
 
         # Fallback: conventional output file name (same basename as AI)
         if not produced_pdf:
-            expected_pdf = os.path.join(out_dir, os.path.splitext(os.path.basename(ai_path))[0] + ".pdf")
-            if os.path.isfile(expected_pdf):
-                produced_pdf.append(expected_pdf)
+            expected_name = os.path.splitext(os.path.basename(ai_path))[0] + ".pdf"
+            for probe_dir in probe_dirs:
+                expected_pdf = os.path.join(probe_dir, expected_name)
+                if os.path.isfile(expected_pdf):
+                    produced_pdf.append(expected_pdf)
 
         for p_out in produced_pdf:
             nk = norm_path(p_out)
@@ -453,13 +528,33 @@ def run_jsx_batch(ai_files, cx, vbs_path, jsx_path, out_dir, log_cb=None, stop_f
 # -------------------------
 # CLI 子进程模式：仅运行 get_best6
 # -------------------------
-def _cli_run_algo(input_dir, work_dir, out1, out2):
+def _cli_run_algo(input_dir, work_dir, out1, out2, disable_single_single_line_special_mode=False):
     # PDF 直接在 input_dir 消费，不再复制/迁移到 work_dir
-    apply_paths_to_module(get_best6, input_dir, input_dir, out1, out2)
     print("=== RUN get_best6.py (拼图) ===")
     print("ALGO_INPUT_DIR:", input_dir)
     print("ALGO_ARCHIVE_DIR:", input_dir)
-    get_best6.main()
+    print("SINGLE_SINGLE_LINE_SPECIAL_MODE:", "OFF" if disable_single_single_line_special_mode else "ON")
+    res = get_best6.run(
+        cfg={
+            "DEST_DIR": input_dir,
+            "TEST_DIR": input_dir,
+            "DEST_DIR1": out1,
+            "DEST_DIR2": out2,
+            "SINGLE_SINGLE_LINE_SPECIAL_MODE": (not bool(disable_single_single_line_special_mode)),
+        },
+        input_pdfs=None,
+        progress_cb=None,
+        log_cb=None,
+    )
+    print(
+        "DONE: single_p1=%d single_p2=%d mix_p1=%d mix_p2=%d"
+        % (
+            len(res.get("single_p1_files") or []),
+            len(res.get("single_p2_files") or []),
+            len(res.get("mix_p1_files") or []),
+            len(res.get("mix_p2_files") or []),
+        )
+    )
     return 0
 
 
@@ -468,7 +563,7 @@ def _is_cli_mode():
 
 
 def _cli_entry():
-    # 简单解析参数（避免引入 argparse）
+    # 简单解析参数(避免引入 argparse)
     if "--run-algo" in sys.argv:
         def _get(flag, default=""):
             if flag in sys.argv:
@@ -480,6 +575,7 @@ def _cli_entry():
         input_dir = _get("--input", "")
         out1 = _get("--out1", "")
         out2 = _get("--out2", "")
+        disable_single_single_line_special_mode = ("--disable-single-single-line-special-mode" in sys.argv)
 
         if not input_dir:
             input_dir = work_dir
@@ -489,7 +585,13 @@ def _cli_entry():
             return 2
 
         try:
-            return _cli_run_algo(input_dir, work_dir, out1, out2)
+            return _cli_run_algo(
+                input_dir,
+                work_dir,
+                out1,
+                out2,
+                disable_single_single_line_special_mode=disable_single_single_line_special_mode,
+            )
         except Exception:
             print("❌ ALGO EXCEPTION:\n" + traceback.format_exc())
             return 1
@@ -583,177 +685,304 @@ class RunnerThread(QThread):
         self.current_proc = None
         return rc
 
-    def _transfer_selected_files(self, src_files, dst_dir, mode="copy"):
-        ensure_dir(dst_dir)
-        moved = []
-        seen = set()
+    def _backup_matching_source_files(self, exported_files, source_dir, backup_dir):
+        ensure_dir(backup_dir)
 
-        for src_path in src_files:
+        source_map = build_pdf_basename_map(source_dir, recursive=True)
+        backed_up = []
+        seen_source = set()
+        no_match = 0
+
+        for item in exported_files:
             if self._stop:
                 break
-            if not src_path:
-                continue
-            if not os.path.isfile(src_path):
-                self.sig_log.emit("⚠️ 源文件不存在，跳过：%s\n" % src_path)
-                continue
 
-            k = norm_path(src_path)
-            if k in seen:
-                continue
-            seen.add(k)
-
-            base = os.path.basename(src_path)
-            dst_path = unique_dest_path(dst_dir, base)
-            if mode == "move":
-                shutil.move(src_path, dst_path)
+            if isinstance(item, dict):
+                ref_path = (item or {}).get("src") or (item or {}).get("dst") or ""
             else:
-                shutil.copy2(src_path, dst_path)
-            moved.append(dst_path)
+                ref_path = str(item or "")
+            if not ref_path:
+                continue
 
-        return moved
+            key = basename_no_ext(ref_path).lower()
+            matches = source_map.get(key, [])
+            if not matches:
+                no_match += 1
+                self.sig_log.emit("⚠️ 未找到同名源文件，跳过备份：%s\n" % os.path.basename(ref_path))
+                continue
+
+            for src_path in matches:
+                nk = norm_path(src_path)
+                if nk in seen_source:
+                    continue
+                seen_source.add(nk)
+
+                dst_path = unique_dest_path(backup_dir, os.path.basename(src_path))
+                shutil.copy2(src_path, dst_path)
+                backed_up.append(dst_path)
+                self.sig_log.emit("[BACKUP] %s -> %s\n" % (src_path, dst_path))
+
+        self.sig_log.emit("同名源文件备份完成：%d 个\n" % len(backed_up))
+        if no_match:
+            self.sig_log.emit("未匹配到同名源文件：%d 个\n" % no_match)
+
+        return backed_up
+
+    def _run_separation_pipeline(self, source_dir, ai_dir, source_backup_batch_dir, cx, jsx_path, vbs_path):
+        # 1) 源文件 -> AI目录(复制并改后缀)
+        self.sig_status.emit("Running", "PDF->AI")
+        self.sig_log.emit("=== STEP1: COPY SOURCE PDF -> AI DIR (.ai extension) ===\n")
+        prep = copy_pdf_to_ai_dir(
+            src_pdf_dir=source_dir,
+            ai_dir=ai_dir,
+            recursive=True,
+            overwrite=False,
+            log_cb=lambda s: self.sig_log.emit(s),
+            stop_flag=lambda: self._stop
+        )
+        if self._stop:
+            self.sig_log.emit("⛔ 已停止：不再继续。\n")
+            return {"abort": True, "rc": 0, "ok_pdf": []}
+
+        pairs = prep.get("pairs", [])
+        if not pairs:
+            self.sig_log.emit("⚠️ 源文件夹中没有可处理的 PDF。\n")
+            return {"abort": False, "rc": 0, "ok_pdf": []}
+
+        ai_files_to_run = [x["ai_path"] for x in pairs if x.get("ai_path")]
+
+        # 2) 执行 JSX 批处理
+        self.sig_status.emit("Running", "AI->PDF (JSX)")
+        self.sig_log.emit("\n=== STEP2: RUN JSX (AI -> PDF export) ===\n")
+        jsx_res = run_jsx_batch(
+            ai_files=ai_files_to_run,
+            cx=cx,
+            vbs_path=vbs_path,
+            jsx_path=jsx_path,
+            out_dir=ai_dir,
+            log_cb=lambda s: self.sig_log.emit(s),
+            stop_flag=lambda: self._stop,
+            proc_setter=self._set_current_proc
+        )
+        if self._stop:
+            self.sig_log.emit("⛔ 已停止：JSX阶段中断。\n")
+            return {"abort": True, "rc": 0, "ok_pdf": []}
+
+        rc_jsx = jsx_res.get("rc", 0)
+        if rc_jsx != 0:
+            self.sig_log.emit("❌ JSX 执行失败 rc=%s\n" % rc_jsx)
+            return {"abort": True, "rc": rc_jsx, "ok_pdf": []}
+
+        ok_ai = [p for p in (jsx_res.get("ok_ai", []) or []) if p and os.path.isfile(p)]
+        ok_pdf = [p for p in (jsx_res.get("ok_pdf", []) or []) if p and os.path.isfile(p)]
+        if not ok_pdf:
+            self.sig_log.emit("\n⚠️ 没有检测到 JSX 成功导出的 PDF。\n")
+            return {"abort": False, "rc": 0, "ok_pdf": []}
+
+        self.sig_log.emit("JSX成功AI数量：%d\n" % len(ok_ai))
+        self.sig_log.emit("JSX导出PDF数量：%d\n" % len(ok_pdf))
+        self.sig_log.emit("JSX导出PDF目录：%s\n" % ai_dir)
+
+        ai_dir_norm = norm_path(ai_dir)
+        not_in_ai_root = [
+            p for p in ok_pdf
+            if norm_path(os.path.dirname(os.path.abspath(p))) != ai_dir_norm
+        ]
+        if not_in_ai_root:
+            self.sig_log.emit("⚠️ 检测到部分导出 PDF 没有落在转化文件夹根目录，已自动跳过：\n")
+            for p in not_in_ai_root[:20]:
+                self.sig_log.emit("   %s\n" % p)
+            if len(not_in_ai_root) > 20:
+                self.sig_log.emit("   ... 还有 %d 个\n" % (len(not_in_ai_root) - 20))
+            ok_pdf = [p for p in ok_pdf if p not in not_in_ai_root]
+            if not ok_pdf:
+                self.sig_log.emit("⚠️ 跳过后没有可继续处理的 PDF。\n")
+                return {"abort": False, "rc": 0, "ok_pdf": []}
+
+        # 3) 备份与本次导出 PDF 同名的源文件
+        self.sig_status.emit("Running", "Backup")
+        self.sig_log.emit("\n=== STEP3: BACKUP MATCHING SOURCE FILES ===\n")
+        backed_up = self._backup_matching_source_files(
+            ok_pdf,
+            source_dir,
+            source_backup_batch_dir
+        )
+        if not backed_up:
+            self.sig_log.emit("⚠️ 本次导出未匹配到需要备份的源文件。\n")
+        else:
+            self.sig_log.emit("源文件备份目录：%s\n" % source_backup_batch_dir)
+        self.sig_log.emit("\n")
+        if self._stop:
+            self.sig_log.emit("⛔ 已停止：不再继续。\n")
+            return {"abort": True, "rc": 0, "ok_pdf": ok_pdf}
+
+        return {"abort": False, "rc": 0, "ok_pdf": ok_pdf}
+
+    def _run_algorithm_pipeline(self, ai_dir, out1, out2):
+        self.sig_status.emit("Running", "Algorithm")
+        if is_frozen_app():
+            self.sig_log.emit("=== STEP4: RUN ALGO (INLINE/FROZEN) ===\n")
+            if self._stop:
+                self.sig_log.emit("⛔ 已停止：算法阶段未开始。\n")
+                return {"abort": True, "rc": 0}
+
+            def _algo_log_cb(msg):
+                try:
+                    self.sig_log.emit(str(msg).rstrip("\n") + "\n")
+                except Exception:
+                    pass
+
+            def _algo_progress_cb(cur, tot, msg):
+                try:
+                    cur_f = float(cur)
+                    tot_f = float(tot) if float(tot) > 0 else 1.0
+                except Exception:
+                    cur_f, tot_f = 0.0, 1.0
+                pct = max(0.0, min(100.0, cur_f * 100.0 / tot_f))
+                self.sig_progress.emit(pct)
+                phase = ("Algorithm: %s" % msg) if msg else "Algorithm"
+                self.sig_status.emit("Running", phase)
+                if msg:
+                    self.sig_log.emit("PROGRESS: %s / %s  %s\n" % (int(cur_f), int(tot_f), msg))
+
+            try:
+                res = get_best6.run(
+                    cfg={
+                        "DEST_DIR": ai_dir,
+                        "TEST_DIR": ai_dir,
+                        "DEST_DIR1": out1,
+                        "DEST_DIR2": out2,
+                        "SINGLE_SINGLE_LINE_SPECIAL_MODE": (not bool(self.cfg.get("disable_single_single_line_special_mode", False))),
+                    },
+                    input_pdfs=None,
+                    progress_cb=_algo_progress_cb,
+                    log_cb=_algo_log_cb
+                )
+                self.sig_progress.emit(100.0)
+                self.sig_log.emit(
+                    "DONE: single_p1=%d single_p2=%d mix_p1=%d mix_p2=%d\n" % (
+                        len(res.get("single_p1_files") or []),
+                        len(res.get("single_p2_files") or []),
+                        len(res.get("mix_p1_files") or []),
+                        len(res.get("mix_p2_files") or []),
+                    )
+                )
+                return {"abort": False, "rc": 0}
+            except Exception:
+                self.sig_log.emit("\n❌ 算法直跑失败:\n" + traceback.format_exc() + "\n")
+                return {"abort": True, "rc": 1}
+
+        self.sig_log.emit("=== STEP4: RUN ALGO (SUBPROCESS) ===\n")
+        cmd_algo = [
+            sys.executable, "-u", os.path.abspath(__file__),
+            "--run-algo",
+            "--input", ai_dir,
+            "--work", ai_dir,
+            "--out1", out1,
+            "--out2", out2
+        ]
+        if bool(self.cfg.get("disable_single_single_line_special_mode", False)):
+            cmd_algo.append("--disable-single-single-line-special-mode")
+        rc = self._spawn_and_stream(cmd_algo)
+        if self._stop:
+            self.sig_log.emit("⛔ 已停止：算法阶段中断。\n")
+            return {"abort": True, "rc": 0}
+        if rc != 0:
+            self.sig_log.emit("\n❌ 算法子进程失败 (rc=%s)\n" % rc)
+            return {"abort": True, "rc": rc}
+        return {"abort": False, "rc": 0}
 
     def run(self):
         try:
             cfg = self.cfg
-            src_pdf_dir = cfg["src_pdf_dir"]   # ✅ 第1个目录：源PDF目录
+            source_dir = cfg["source_dir"]     # ✅ 第1个目录：源文件夹
             ai_dir = cfg["ai_dir"]             # ✅ 第2个目录：AI目录
-            test_root = cfg["test_root"]
+            source_backup_dir = cfg["source_backup_dir"]  # ✅ 第3个目录：源文件备份
             out1 = cfg["out1"]
             out2 = cfg["out2"]
-            mode = cfg["mode"]
             cx = cfg.get("cx", 2)
+            run_mode = cfg.get("run_mode", RUN_MODE_FULL)
+            run_mode_text = RUN_MODE_TEXT.get(run_mode, run_mode)
 
             script_dir = os.path.dirname(os.path.abspath(__file__))
-            jsx_path = os.path.join(script_dir, "run", "AItest_ai.jsx")
+            jsx_path = os.path.join(script_dir, "run", "AItest3.jsx")
             if not os.path.isfile(jsx_path):
-                jsx_path = os.path.join(script_dir, "AItest_ai.jsx")
+                jsx_path = os.path.join(script_dir, "AItest3.jsx")
             vbs_path = os.path.join(script_dir, "run_ai.vbs")
 
             self.sig_status.emit("Running", "Preparing")
             self.sig_progress.emit(0.0)
 
-            ensure_dir(ai_dir)
-            ensure_dir(test_root)
-            ensure_dir(out1)
-            ensure_dir(out2)
+            if run_mode in (RUN_MODE_FULL, RUN_MODE_SEPARATE):
+                ensure_dir(ai_dir)
+                ensure_dir(source_backup_dir)
+            if run_mode in (RUN_MODE_FULL, RUN_MODE_ALGO):
+                ensure_dir(out1)
+                ensure_dir(out2)
 
-            ts = datetime.now().strftime("%Y%m%d_%H%M%S")
-            work_dir = os.path.join(test_root, "work_" + ts)
-            ensure_dir(work_dir)
+            if run_mode in (RUN_MODE_FULL, RUN_MODE_SEPARATE):
+                batch_name = make_unique_batch_name([source_backup_dir])
+                source_backup_batch_dir = os.path.join(source_backup_dir, batch_name)
+                ensure_dir(source_backup_batch_dir)
+            else:
+                batch_name = ""
+                source_backup_batch_dir = ""
 
             self.sig_log.emit("=== CONFIG ===\n")
-            self.sig_log.emit("源PDF目录 SRC_PDF_DIR                  : %s\n" % src_pdf_dir)
+            self.sig_log.emit("运行模式 RUN_MODE                    : %s\n" % run_mode_text)
+            self.sig_log.emit("源文件夹 SOURCE_DIR                   : %s\n" % source_dir)
             self.sig_log.emit("AI目录 AI_DIR                        : %s\n" % ai_dir)
-            self.sig_log.emit("工作目录 TEST_DIR(work)               : %s\n" % work_dir)
+            self.sig_log.emit("源文件备份 SOURCE_BACKUP_DIR          : %s\n" % source_backup_dir)
+            self.sig_log.emit("源文件备份(本次) SOURCE_BACKUP_BATCH   : %s\n" % (source_backup_batch_dir or "（当前模式未使用）"))
+            self.sig_log.emit("本次批次 RUN_BATCH_NAME              : %s\n" % (batch_name or "（当前模式未使用）"))
             self.sig_log.emit("输出拼图 DEST_DIR1                   : %s\n" % out1)
             self.sig_log.emit("输出刀线 DEST_DIR2                   : %s\n" % out2)
-            self.sig_log.emit("传输模式 TRANSFER_MODE               : %s\n" % mode)
             self.sig_log.emit("JSX                                  : %s\n" % jsx_path)
             self.sig_log.emit("VBS                                  : %s\n" % vbs_path)
             self.sig_log.emit("CX                                   : %s\n" % str(cx))
+            self.sig_log.emit(
+                "单枚单线特殊模式 SINGLE_SINGLE_LINE_SPECIAL_MODE : %s\n"
+                % ("关闭" if bool(cfg.get("disable_single_single_line_special_mode", False)) else "开启")
+            )
             self.sig_log.emit("运行算法 ALGO                         : get_best6 (拼图)\n")
             self.sig_log.emit("================\n\n")
 
-            if not os.path.isdir(src_pdf_dir):
-                self.sig_log.emit("❌ 源PDF目录不存在：%s\n" % src_pdf_dir)
+            if run_mode in (RUN_MODE_FULL, RUN_MODE_SEPARATE) and (not os.path.isdir(source_dir)):
+                self.sig_log.emit("❌ 源文件夹不存在：%s\n" % source_dir)
                 self.sig_done.emit(2)
                 return
 
-            # 1) 源PDF -> AI目录（复制并改后缀）
-            self.sig_status.emit("Running", "PDF->AI")
-            self.sig_log.emit("=== STEP1: COPY SOURCE PDF -> AI DIR (.ai extension) ===\n")
-            prep = copy_pdf_to_ai_dir(
-                src_pdf_dir=src_pdf_dir,
-                ai_dir=ai_dir,
-                recursive=True,
-                overwrite=False,
-                log_cb=lambda s: self.sig_log.emit(s),
-                stop_flag=lambda: self._stop
-            )
-            if self._stop:
-                self.sig_log.emit("⛔ 已停止：不再继续。\n")
-                self.sig_done.emit(0)
+            if run_mode == RUN_MODE_ALGO and (not os.path.isdir(ai_dir)):
+                self.sig_log.emit("❌ 转化文件夹不存在：%s\n" % ai_dir)
+                self.sig_done.emit(2)
                 return
 
-            pairs = prep.get("pairs", [])
-            if not pairs:
-                self.sig_log.emit("⚠️ 源PDF目录中没有可处理的 PDF。\n")
-                self.sig_done.emit(0)
-                return
+            if run_mode in (RUN_MODE_FULL, RUN_MODE_SEPARATE):
+                sep_res = self._run_separation_pipeline(
+                    source_dir=source_dir,
+                    ai_dir=ai_dir,
+                    source_backup_batch_dir=source_backup_batch_dir,
+                    cx=cx,
+                    jsx_path=jsx_path,
+                    vbs_path=vbs_path
+                )
+                if sep_res.get("abort"):
+                    self.sig_done.emit(int(sep_res.get("rc", 0)))
+                    return
+                if run_mode == RUN_MODE_SEPARATE:
+                    self.sig_log.emit("✅ 当前模式已完成：仅分离\n")
+                    self.sig_done.emit(0)
+                    return
+                if not (sep_res.get("ok_pdf") or []):
+                    self.sig_log.emit("⚠️ 分离阶段没有得到可用于拼接的 PDF，本次一气呵成到此结束。\n")
+                    self.sig_done.emit(0)
+                    return
 
-            ai_files_to_run = [x["ai_path"] for x in pairs if x.get("ai_path")]
-
-            # 2) 执行 JSX 批处理
-            self.sig_status.emit("Running", "AI->PDF (JSX)")
-            self.sig_log.emit("\n=== STEP2: RUN JSX (AI -> PDF export) ===\n")
-            jsx_res = run_jsx_batch(
-                ai_files=ai_files_to_run,
-                cx=cx,
-                vbs_path=vbs_path,
-                jsx_path=jsx_path,
-                out_dir=ai_dir,
-                log_cb=lambda s: self.sig_log.emit(s),
-                stop_flag=lambda: self._stop,
-                proc_setter=self._set_current_proc
-            )
-            if self._stop:
-                self.sig_log.emit("⛔ 已停止：JSX阶段中断。\n")
-                self.sig_done.emit(0)
-                return
-
-            rc_jsx = jsx_res.get("rc", 0)
-            if rc_jsx != 0:
-                self.sig_log.emit("❌ JSX 执行失败 rc=%s\n" % rc_jsx)
-                self.sig_done.emit(rc_jsx)
-                return
-
-            ok_ai = [p for p in (jsx_res.get("ok_ai", []) or []) if p and os.path.isfile(p)]
-            if not ok_ai:
-                self.sig_log.emit("\n⚠️ 没有 JSX 成功的 AI 可传入 work 目录。\n")
-                self.sig_done.emit(0)
-                return
-
-            self.sig_log.emit("JSX成功AI数量：%d\n" % len(ok_ai))
-
-            # 3) 传入 work 的文件改为：JSX 成功的 AI 文件
-            self.sig_status.emit("Running", "Transfer")
-            self.sig_log.emit("\n=== STEP3: TRANSFER SUCCESS AI FILES TO WORK ===\n")
-            moved = self._transfer_selected_files(
-                ok_ai,
-                work_dir,
-                mode=("move" if mode == "move" else "copy")
-            )
-            self.sig_log.emit("传输完成：%d 个AI进入 work 目录\n\n" % len(moved))
-            if self._stop:
-                self.sig_log.emit("⛔ 已停止：不再继续运行算法。\n")
-                self.sig_done.emit(0)
-                return
-
-            if not moved:
-                self.sig_log.emit("⚠️ 没有文件进入 work 目录，停止运行算法。\n")
-                self.sig_done.emit(0)
-                return
-
-            # 4) Algo subprocess
-            self.sig_status.emit("Running", "Algorithm")
-            self.sig_log.emit("=== STEP4: RUN ALGO (SUBPROCESS) ===\n")
-            cmd_algo = [
-                sys.executable, "-u", os.path.abspath(__file__),
-                "--run-algo",
-                "--input", ai_dir,
-                "--work", work_dir,
-                "--out1", out1,
-                "--out2", out2
-            ]
-            rc = self._spawn_and_stream(cmd_algo)
-            if self._stop:
-                self.sig_log.emit("⛔ 已停止：算法阶段中断。\n")
-                self.sig_done.emit(0)
-                return
-            if rc != 0:
-                self.sig_log.emit("\n❌ 算法子进程失败 (rc=%s)\n" % rc)
-                self.sig_done.emit(rc)
-                return
+            if run_mode in (RUN_MODE_FULL, RUN_MODE_ALGO):
+                algo_res = self._run_algorithm_pipeline(ai_dir=ai_dir, out1=out1, out2=out2)
+                if algo_res.get("abort"):
+                    self.sig_done.emit(int(algo_res.get("rc", 0)))
+                    return
 
             self.sig_done.emit(0)
 
@@ -782,17 +1011,24 @@ class HelpDialog(QDialog):
         layout.addWidget(btn, alignment=Qt.AlignRight)
 
         help_text = (
-            "【运行顺序（已按你要求修改）】\n"
-            "1）第1个目录选择：源PDF目录\n"
-            "2）第2个目录选择：AI目录\n"
-            "3）程序会把第1个目录中的 PDF 复制到第2个目录，并改后缀为 .ai（仅改扩展名，不是格式转换）\n"
-            "4）对这些 .ai 执行：cscript //nologo run_ai.vbs AItest_ai.jsx \"2;AI全路径;输出目录\"\n"
-            "5）把“JSX 处理成功的 AI 文件”复制/移动到 work 目录\n"
-            "6）子进程运行 get_best6 进行拼图输出\n\n"
+            "【功能模式】\n"
+            "1)仅分离：源文件 -> AI目录(.ai) -> JSX导出PDF -> 同名源文件备份\n"
+            "2)仅拼接：直接读取“转化文件夹”中的 PDF，运行 get_best6 输出印刷/刀版文件\n"
+            "3)一气呵成：按完整流程连续执行分离 + 拼接\n\n"
+            "【目录说明(保持不变)】\n"
+            "1)第1个目录选择：源文件夹(原始PDF)\n"
+            "2)第2个目录选择：AI目录\n"
+            "3)第3个目录选择：源文件  (备份)(程序会在这里自动新建同名时间子目录)\n"
+            "4)程序会把第1个目录中的 PDF 复制到第2个目录，并改后缀为 .ai(仅改扩展名，不是格式转换)\n"
+            "5)对这些 .ai 执行：cscript //nologo run_ai.vbs AItest3.jsx \"2;AI全路径;输出目录\"\n"
+            "6)JSX 导出的 PDF 会直接保存到第2个目录根层；同名文件自动覆盖，不再弹确认框\n"
+            "7)把与本次导出 PDF 同名的源文件复制到“源文件  (备份)”下同名时间文件夹\n"
+            "8)子进程直接读取 AI 目录里的 PDF，运行 get_best6 进行拼图输出\n\n"
             "【注意】\n"
-            "- run.py、AItest_ai.jsx、run_ai.vbs 必须在同一目录\n"
-            "- JSX 输出目录仍然是第2个 AI 目录\n"
-            "- 传入 work 的是 JSX 成功的 AI 文件（仅归档/留存）\n"
+            "- run.py、AItest3.jsx、run_ai.vbs 必须在同一目录\n"
+            "- get_best6 现在直接读取 AI 目录中的 PDF\n"
+            "- 源文件  (备份) 只备份与本次导出 PDF 同名的源 PDF\n"
+            "- 单个 AI 文件如果分离失败，会自动跳过并继续后面的文件\n"
         )
         self.txt.setPlainText(help_text)
 
@@ -815,21 +1051,65 @@ class RollWidget(QWidget):
 
         self.resize(1120, 800)
         self.worker = None
+        self._loading_settings = False
+        self.settings = QSettings("InkLink", "PdfAiRunner")
 
         self._build_ui()
         self._apply_qss()
 
         # 默认值
-        self.ed_src_pdf.setText(r"D:\test_data\src")
-        self.ed_ai.setText(r"D:\test_data\iest")
-        self.ed_test.setText(r"D:\test_data\test")
-        self.ed_out1.setText(r"D:\test_data\gest")
-        self.ed_out2.setText(r"D:\test_data\pest")
-        self.rb_copy.setChecked(True)
+        self.ed_src_pdf.setText(r"D:\我的数据\文档\get")
+        self.ed_ai.setText(r"D:\我的数据\文档\已解密文件")
+        self.ed_src_backup.setText(r"D:\我的数据\文档\源文件  (备份)")
+        self.ed_out1.setText(r"D:\我的数据\文档\2")
+        self.ed_out2.setText(r"D:\我的数据\文档\3")
+
+        self._load_settings()
+        self._bind_settings_signals()
 
         self._set_status("Idle", "Ready")
         self._set_progress_indeterminate(False)
         self.clear_log()
+
+    def _bind_settings_signals(self):
+        self.ed_src_pdf.textChanged.connect(self._save_settings)
+        self.ed_ai.textChanged.connect(self._save_settings)
+        self.ed_src_backup.textChanged.connect(self._save_settings)
+        self.ed_out1.textChanged.connect(self._save_settings)
+        self.ed_out2.textChanged.connect(self._save_settings)
+        self.chk_disable_single_single_line_special_mode.toggled.connect(self._save_settings)
+
+    def _load_settings(self):
+        self._loading_settings = True
+        try:
+            self.ed_src_pdf.setText(self.settings.value("paths/source_dir", self.settings.value("paths/src_pdf_dir", self.ed_src_pdf.text(), type=str), type=str))
+            self.ed_ai.setText(self.settings.value("paths/ai_dir", self.ed_ai.text(), type=str))
+            self.ed_src_backup.setText(self.settings.value("paths/source_backup_dir", self.ed_src_backup.text(), type=str))
+            self.ed_out1.setText(self.settings.value("paths/out1", self.ed_out1.text(), type=str))
+            self.ed_out2.setText(self.settings.value("paths/out2", self.ed_out2.text(), type=str))
+            self.chk_disable_single_single_line_special_mode.setChecked(
+                bool(self.settings.value("options/disable_single_single_line_special_mode", False, type=bool))
+            )
+        finally:
+            self._loading_settings = False
+
+    def _save_settings(self, *args):
+        if self._loading_settings:
+            return
+
+        source_dir = self.ed_src_pdf.text().strip()
+
+        self.settings.setValue("paths/source_dir", source_dir)
+        self.settings.setValue("paths/src_pdf_dir", source_dir)
+        self.settings.setValue("paths/ai_dir", self.ed_ai.text().strip())
+        self.settings.setValue("paths/source_backup_dir", self.ed_src_backup.text().strip())
+        self.settings.setValue("paths/out1", self.ed_out1.text().strip())
+        self.settings.setValue("paths/out2", self.ed_out2.text().strip())
+        self.settings.setValue(
+            "options/disable_single_single_line_special_mode",
+            bool(self.chk_disable_single_single_line_special_mode.isChecked()),
+        )
+        self.settings.sync()
 
     def _apply_qss(self):
         qss = """
@@ -867,6 +1147,19 @@ class RollWidget(QWidget):
             font-weight: 700;
         }
         QPushButton#btnStart:hover { background: #2563eb; }
+        QPushButton#btnSeparate {
+            background: #0f766e;
+            border: none;
+            font-weight: 700;
+        }
+        QPushButton#btnSeparate:hover { background: #0d9488; }
+        QPushButton#btnAlgo {
+            background: #f59e0b;
+            color: #111827;
+            border: none;
+            font-weight: 700;
+        }
+        QPushButton#btnAlgo:hover { background: #d97706; }
         QPushButton#btnStop {
             background: #ef4444;
             border: none;
@@ -906,7 +1199,7 @@ class RollWidget(QWidget):
         f = QFont("Microsoft YaHei UI", 18)
         f.setBold(True)
         lb_title.setFont(f)
-        lb_sub = QLabel("顺序：源PDF目录 -> AI目录(.ai) -> JSX成功AI传入work -> 子进程拼图 get_best6")
+        lb_sub = QLabel("支持：仅分离 / 仅拼接 / 一气呵成，目录配置保持不变")
         lb_sub.setStyleSheet("color:#94a3b8;")
         title_box.addWidget(lb_title)
         title_box.addWidget(lb_sub)
@@ -958,43 +1251,53 @@ class RollWidget(QWidget):
             grid.addWidget(btn, r, 2)
             return ed
 
-        # ✅ 第1个目录：源PDF目录
-        self.ed_src_pdf = add_path_row(0, "源PDF目录")
+        # ✅ 第1个目录：源文件夹
+        self.ed_src_pdf = add_path_row(0, "源文件夹  (原始PDF)")
 
         # ✅ 第2个目录：AI目录
-        self.ed_ai = add_path_row(1, "AI目录（源PDF复制改后缀到这里）")
+        self.ed_ai = add_path_row(1, "转化文件夹 (PDF文件转化为AI文件)")
 
-        # ✅ 第3~5个保持不变
-        self.ed_test = add_path_row(2, "工作根目录")
-        self.ed_out1 = add_path_row(3, "输出拼图目录")
-        self.ed_out2 = add_path_row(4, "输出刀线目录")
+        # ✅ 第3个目录：源文件备份
+        self.ed_src_backup = add_path_row(2, "备份文件夹  (源文件, 自动创建时间子目录)")
+
+        # ✅ 第4~5个保持不变
+        self.ed_out1 = add_path_row(3, "印刷文件夹 (输出PDF 印刷)")
+        self.ed_out2 = add_path_row(4, "刀版文件夹 (输出刀版文件)")
 
         grid.setColumnStretch(1, 1)
         left_layout.addWidget(gp_paths)
 
-        gp_opts = QGroupBox("运行选项")
-        vopts = QVBoxLayout(gp_opts)
+        gp_mode = QGroupBox("运行功能")
+        mode_layout = QVBoxLayout(gp_mode)
+        lb_mode = QLabel("目录不变，可按需要单独运行“分离”或“拼接”，也可继续直接一气呵成。")
+        lb_mode.setStyleSheet("color:#94a3b8;")
+        mode_layout.addWidget(lb_mode)
 
-        row_mode = QHBoxLayout()
-        row_mode.addWidget(QLabel("传输模式："))
-        self.rb_copy = QRadioButton("复制 copy")
-        self.rb_move = QRadioButton("移动 move")
-        grp_mode = QButtonGroup(self)
-        grp_mode.addButton(self.rb_copy, 0)
-        grp_mode.addButton(self.rb_move, 1)
-        row_mode.addWidget(self.rb_copy)
-        row_mode.addWidget(self.rb_move)
-        row_mode.addStretch(1)
-        vopts.addLayout(row_mode)
+        mode_row = QHBoxLayout()
+        self.btn_run_separate = QPushButton("① 仅分离")
+        self.btn_run_separate.setObjectName("btnSeparate")
+        self.btn_run_separate.clicked.connect(self.start_separate)
+        mode_row.addWidget(self.btn_run_separate)
 
-        left_layout.addWidget(gp_opts)
+        self.btn_run_algo = QPushButton("② 仅拼接")
+        self.btn_run_algo.setObjectName("btnAlgo")
+        self.btn_run_algo.clicked.connect(self.start_algo)
+        mode_row.addWidget(self.btn_run_algo)
 
-        gp_btn = QGroupBox("操作")
-        hb = QHBoxLayout(gp_btn)
-
-        self.btn_start = QPushButton("▶ 开始运行")
+        self.btn_start = QPushButton("▶ 一气呵成")
         self.btn_start.setObjectName("btnStart")
         self.btn_start.clicked.connect(self.start)
+        mode_row.addWidget(self.btn_start)
+        mode_layout.addLayout(mode_row)
+
+        self.chk_disable_single_single_line_special_mode = QCheckBox("点击后关闭：单枚单线引号内规则")
+        self.chk_disable_single_single_line_special_mode.setChecked(False)
+        self.chk_disable_single_single_line_special_mode.setStyleSheet("color:#cbd5e1;")
+        mode_layout.addWidget(self.chk_disable_single_single_line_special_mode)
+        left_layout.addWidget(gp_mode)
+
+        gp_btn = QGroupBox("辅助操作")
+        hb = QHBoxLayout(gp_btn)
 
         self.btn_stop = QPushButton("⛔ 停止运行")
         self.btn_stop.setObjectName("btnStop")
@@ -1013,7 +1316,7 @@ class RollWidget(QWidget):
         hb.addWidget(self.btn_clear)
         left_layout.addWidget(gp_btn)
 
-        tip = QLabel("提示：传入work的是JSX成功AI，拼图读取AI目录中的PDF。")
+        tip = QLabel("提示：仅分离会生成并备份 PDF；仅拼接会直接读取“转化文件”中的 PDF；一气呵成保留原完整流程。")
         tip.setStyleSheet("color:#94a3b8;")
         left_layout.addWidget(tip)
         left_layout.addStretch(1)
@@ -1026,7 +1329,7 @@ class RollWidget(QWidget):
         right_layout.setContentsMargins(0, 0, 0, 0)
         right_layout.setSpacing(12)
 
-        gp_log = QGroupBox("运行日志（子进程 stdout 实时回传）")
+        gp_log = QGroupBox("运行日志(子进程 stdout 实时回传)")
         vlog = QVBoxLayout(gp_log)
 
         self.log = QTextEdit()
@@ -1043,6 +1346,7 @@ class RollWidget(QWidget):
         d = QFileDialog.getExistingDirectory(self, "选择文件夹", line_edit.text().strip() or os.getcwd())
         if d:
             line_edit.setText(d)
+            self._save_settings()
 
     def _set_status(self, status, phase):
         self.lb_status.setText(status)
@@ -1068,9 +1372,6 @@ class RollWidget(QWidget):
         dlg = HelpDialog(self)
         dlg.exec()
 
-    def _get_mode_value(self):
-        return "move" if self.rb_move.isChecked() else "copy"
-
     def _append_log(self, s: str):
         line = s.rstrip("\n")
         if not line:
@@ -1082,7 +1383,7 @@ class RollWidget(QWidget):
             color = "#60a5fa"
         elif ("❌" in line) or line.startswith("ERR:") or line.startswith("RET: 500") or ("500;ERR;" in line) or ("EXCEPTION" in line) or line.startswith("[FATAL]") or line.startswith("[ERR]"):
             color = "#fb7185"
-        elif ("⚠️" in line) or line.startswith("WARN:") or line.startswith("[SKIP"):
+        elif ("⚠️" in line) or line.startswith("WARN:") or line.startswith("[SKIP") or line.startswith("[REUSE"):
             color = "#fbbf24"
         elif ("✅" in line) or ("OK" in line) or line.startswith("[OK]"):
             color = "#34d399"
@@ -1096,7 +1397,7 @@ class RollWidget(QWidget):
             self._set_status("Running", "AI->PDF (JSX)")
             self._set_progress_indeterminate(True)
         elif "STEP3:" in line:
-            self._set_status("Running", "Transfer")
+            self._set_status("Running", "Backup")
             self._set_progress_indeterminate(True)
         elif "STEP4:" in line:
             self._set_status("Running", "Algorithm")
@@ -1104,49 +1405,78 @@ class RollWidget(QWidget):
 
         self.log.append('<span style="color:%s">%s</span>' % (color, self._html_escape(line)))
 
+    def _set_run_buttons_enabled(self, enabled):
+        self.btn_start.setEnabled(enabled)
+        self.btn_run_separate.setEnabled(enabled)
+        self.btn_run_algo.setEnabled(enabled)
+
     def start(self):
+        self.start_with_mode(RUN_MODE_FULL)
+
+    def start_separate(self):
+        self.start_with_mode(RUN_MODE_SEPARATE)
+
+    def start_algo(self):
+        self.start_with_mode(RUN_MODE_ALGO)
+
+    def start_with_mode(self, run_mode):
         if self.worker is not None:
             return
 
-        src_pdf_dir = self.ed_src_pdf.text().strip()
+        source_dir = self.ed_src_pdf.text().strip()
         ai_dir = self.ed_ai.text().strip()
-        test_root = self.ed_test.text().strip()
+        source_backup_dir = self.ed_src_backup.text().strip()
         out1 = self.ed_out1.text().strip()
         out2 = self.ed_out2.text().strip()
-        mode = self._get_mode_value()
 
-        if not os.path.isdir(src_pdf_dir):
-            QMessageBox.critical(self, "错误", "源PDF目录不存在：\n" + src_pdf_dir)
+        if run_mode in (RUN_MODE_FULL, RUN_MODE_SEPARATE) and (not os.path.isdir(source_dir)):
+            QMessageBox.critical(self, "错误", "源文件夹不存在：\n" + source_dir)
             return
         if not ai_dir:
             QMessageBox.critical(self, "错误", "AI目录不能为空")
             return
-        if not test_root:
-            QMessageBox.critical(self, "错误", "工作根目录不能为空")
+        if run_mode in (RUN_MODE_FULL, RUN_MODE_SEPARATE) and (not source_backup_dir):
+            QMessageBox.critical(self, "错误", "源文件备份目录不能为空")
+            return
+        if run_mode in (RUN_MODE_FULL, RUN_MODE_ALGO):
+            if not out1:
+                QMessageBox.critical(self, "错误", "印刷文件夹不能为空")
+                return
+            if not out2:
+                QMessageBox.critical(self, "错误", "刀版文件夹不能为空")
+                return
+        if run_mode == RUN_MODE_ALGO and (not os.path.isdir(ai_dir)):
+            QMessageBox.critical(self, "错误", "转化文件夹不存在：\n" + ai_dir)
             return
 
-        ensure_dir(ai_dir)
-        ensure_dir(test_root)
-        ensure_dir(out1)
-        ensure_dir(out2)
+        if run_mode in (RUN_MODE_FULL, RUN_MODE_SEPARATE):
+            ensure_dir(ai_dir)
+            ensure_dir(source_backup_dir)
+        if run_mode in (RUN_MODE_FULL, RUN_MODE_ALGO):
+            ensure_dir(out1)
+            ensure_dir(out2)
 
-        self.btn_start.setEnabled(False)
+        self._set_run_buttons_enabled(False)
         self.btn_stop.setEnabled(True)
         self._set_status("Running", "Preparing")
         self._set_progress_indeterminate(True)
         self.pb.setValue(0)
 
         self.clear_log()
+        self._append_log("模式：%s\n" % RUN_MODE_TEXT.get(run_mode, run_mode))
 
         cfg = {
-            "src_pdf_dir": src_pdf_dir,
+            "source_dir": source_dir,
             "ai_dir": ai_dir,
-            "test_root": test_root,
+            "source_backup_dir": source_backup_dir,
             "out1": out1,
             "out2": out2,
-            "mode": mode,
             "cx": 2,
+            "run_mode": run_mode,
+            "disable_single_single_line_special_mode": bool(self.chk_disable_single_single_line_special_mode.isChecked()),
         }
+
+        self._save_settings()
 
         self.worker = RunnerThread(cfg)
         self.worker.sig_log.connect(self._append_log)
@@ -1171,7 +1501,7 @@ class RollWidget(QWidget):
             self._set_status("Failed", "Stopped/Error")
             self._append_log("\n❌ FAILED (rc=%s)\n" % rc)
 
-        self.btn_start.setEnabled(True)
+        self._set_run_buttons_enabled(True)
         self.btn_stop.setEnabled(False)
 
         try:
@@ -1192,9 +1522,10 @@ class RollWidget(QWidget):
             pass
 
     def closeEvent(self, event):
+        self._save_settings()
         if self.worker is not None:
             ret = QMessageBox.question(
-                self, "退出", "正在运行中，确定要退出吗？（会终止子进程）",
+                self, "退出", "正在运行中，确定要退出吗？(会终止子进程)",
                 QMessageBox.Yes | QMessageBox.No, QMessageBox.No
             )
             if ret != QMessageBox.Yes:
